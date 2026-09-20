@@ -32,7 +32,7 @@ sa --version                     # 确认装好了
 ```
 
 - 不加 `--editable` 是装一份当前代码的快照，改代码后要 `uv tool install --reinstall .` 才会更新
-- 在别的电脑上直接从 GitHub 装：`uv tool install git+ssh://git@github.com/shfentmall/SimpleAgent.git`
+- 在别的电脑上直接从 GitHub 装：`uv tool install git+https://github.com/tjiisztiuv/SimpleAgent.git`
 - 卸载：`uv tool uninstall simpleagent`（`~/.simpleagent/` 里的配置和会话不会删）
 - 命令装在 `~/.local/bin/`；不在 PATH 里的话执行一次 `uv tool update-shell`
 
