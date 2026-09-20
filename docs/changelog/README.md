@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-20 debug 新增 full 档：直接看到发给模型的 messages 正文和模型的返回](2026-09-20-debug-full-bodies.md)
 - [2026-09-20 新增 debug 模式：交互时看清 API 调用与工具调用的过程（三档开关，输出走 stderr）](2026-09-20-debug-mode.md)
 - [2026-09-19 空间会话里模型回复改为 Markdown 渲染（标题/列表/表格/引用/链接，零依赖手写，图片不加载）](2026-09-19-space-session-markdown-render.md)
 - [2026-09-18 README 按「怎么用 sa」重写，补 v0.1.0 发布日志](2026-09-18-readme-rewrite-v0.1.0-release.md)

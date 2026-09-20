@@ -20,8 +20,11 @@ max_lines = 500     # 行数上限（两个上限都要满足）；完整内容�
 # read_file 自己分页（约 3 万字符或 limit 行），不受这里限制
 
 # [debug]
+# 三个开关递进，高的隐含低的；过程输出都走 stderr，可以 2>debug.log 单独存一份
 # enabled = false   # 交互时显示 API 调用和工具调用的过程（也可 sa --debug、REPL 里 /debug on）
-# verbose = true    # 再加每轮的消息清单（role + 字符数）和请求开关；过程输出走 stderr
+# verbose = true    # 再加每轮的消息清单（role + 字符数）和请求开关
+# full = true       # 再加真正发出去的 messages 正文和模型的返回（含思考、工具调用）
+#                   # 每条消息最多 30 行；正文可能含工具读到的文件内容，注意日志去向
 
 # [panel]
 # archive_after_minutes = 30   # 控制面板的消息点开后多久移进归档；没点开的不会自动归档

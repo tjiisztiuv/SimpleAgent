@@ -24,15 +24,17 @@ from simpleagent.config import Config, Profile
 from simpleagent.events import (
     ApiRequest,
     ApiResponse,
+    MessageDone,
     ToolCallStart,
     ToolResult,
     Usage,
+    message_outline,
 )
-from simpleagent.llm.client import LLMClient, message_outline
+from simpleagent.llm.client import LLMClient
 from simpleagent.llm.fake import FakeLLM
 from simpleagent.permissions import Policy
 from simpleagent.tools import ToolContext, ToolRegistry, builtin_tools, tool
-from simpleagent.ui.debug import DebugRenderer, debug_level
+from simpleagent.ui.debug import DebugRenderer, debug_level, prettify_json
 from simpleagent.ui.headless import Headless
 from simpleagent.ui.repl import Renderer, Repl
 
@@ -207,10 +209,10 @@ async def test_unknown_tool_has_no_decision(tmp_path: Path):
 # ------------------------------------------------------------ 3. 渲染
 
 
-def make_debug(verbose: bool = False) -> tuple[DebugRenderer, io.StringIO, io.StringIO]:
+def make_debug(level: str = "on") -> tuple[DebugRenderer, io.StringIO, io.StringIO]:
     out, err = io.StringIO(), io.StringIO()
     inner = Renderer(out, color=False, show_reasoning=False)
-    return DebugRenderer(inner, err, color=False, verbose=verbose), out, err
+    return DebugRenderer(inner, err, color=False, level=level), out, err
 
 
 def test_debug_renderer_writes_process_to_stderr():
@@ -254,7 +256,7 @@ def test_debug_renderer_writes_process_to_stderr():
 
 
 def test_verbose_adds_outline_without_content():
-    debug, _, err = make_debug(verbose=True)
+    debug, _, err = make_debug(level="verbose")
     debug.on_event(
         ApiRequest(
             2,
@@ -273,6 +275,102 @@ def test_verbose_adds_outline_without_content():
     assert "extra_body=thinking" in text
     # 只有结构，没有正文
     assert "412" in text and "系统提示" not in text
+
+
+def make_sent_request(step: int = 1) -> ApiRequest:
+    """一条带正文的请求：full 档展开的就是 sent 里的内容。"""
+    sent: list[dict[str, Any]] = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "hi"},
+        # content 和 tool_calls 同时在：正文之外还要标出带了几个调用
+        {
+            "role": "assistant",
+            "content": "看一下",
+            "tool_calls": [
+                {
+                    "id": "c0",
+                    "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "content": "line\n" * 40},
+    ]
+    return ApiRequest(
+        step,
+        "https://api.deepseek.com/v1/chat/completions",
+        "deepseek-chat",
+        len(sent),
+        2,
+        1024,
+        message_outline(sent),
+        {"stream_usage": True},
+        sent=sent,
+        tool_names=["list_dir", "bash"],
+    )
+
+
+def test_full_expands_request_and_response_bodies():
+    debug, _, err = make_debug(level="full")
+    debug.on_event(make_sent_request())
+    debug.on_event(
+        MessageDone(
+            message={
+                "role": "assistant",
+                "content": "读完了",
+                "reasoning_content": "先看文件",
+                "tool_calls": [
+                    {
+                        "id": "c0",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'},
+                    }
+                ],
+            }
+        )
+    )
+    text = err.getvalue()
+
+    # 请求侧：每条消息一行表头（role + 大小）+ 缩进正文
+    assert "[0] system · 4 B" in text
+    assert "│ 系统提示" in text
+    assert "[1] user · 2 B" in text
+    assert "│ 看一下" in text and "（另有 1 个工具调用）" in text
+    assert "│ line" in text
+    # 超过 BODY_LINES 的正文截断，并指出全文在哪
+    assert "…还有 10 行（全文见 trace）" in text
+    assert "tools  list_dir · bash" in text
+    # full 档不再打 verbose 的摘要行，免得和正文块重复
+    assert "msgs  system" not in text
+
+    # 响应侧：content / reasoning / tool_calls 三块都展开
+    assert "\n   message\n" in text
+    assert "├ content" in text and "读完了" in text
+    assert "├ reasoning · 4 B" in text and "先看文件" in text
+    assert "└ tool_calls · 1 个" in text
+    assert "1. read_file" in text
+    assert '"path": "a.txt"' in text
+
+
+def test_on_and_verbose_never_print_bodies():
+    """正文是 full 档独有的：低档位一个字都不能多打。"""
+    for level in ("on", "verbose"):
+        debug, _, err = make_debug(level=level)
+        debug.on_event(make_sent_request())
+        debug.on_event(MessageDone(message={"role": "assistant", "content": "读完了"}))
+        text = err.getvalue()
+        assert "系统提示" not in text
+        assert "读完了" not in text
+        assert "\n   message\n" not in text
+        assert "│ " not in text
+
+
+def test_prettify_json_only_touches_real_structure():
+    assert prettify_json('{"a": 1}') == '{\n  "a": 1\n}'
+    # 流式拼到一半的 JSON 和标量原样返回，不猜也不吞
+    assert prettify_json('{"a": ') == '{"a": '
+    assert prettify_json("42") == "42"
+    assert prettify_json("") == ""
 
 
 def test_failed_and_denied_lines_are_marked():
@@ -324,7 +422,9 @@ def test_debug_level_from_config():
         debug_level(Config.model_validate({**base, "debug": {"enabled": True, "verbose": True}}))
         == "verbose"
     )
-    # verbose 单独打开不算数
+    # full 档隐含前面两档
+    assert debug_level(Config.model_validate({**base, "debug": {"full": True}})) == "full"
+    # verbose / full 单独打开都不算数（得先开 enabled）
     assert debug_level(Config.model_validate({**base, "debug": {"verbose": True}})) == "off"
 
 
@@ -372,6 +472,23 @@ async def test_headless_debug_goes_to_stderr(config: Config, tmp_path: Path):
     assert "/chat/completions" in err.getvalue()
     # debug 模式下不再重复打统计行
     assert "耗时" not in out.getvalue()
+
+
+async def test_full_level_expands_bodies_in_headless(config: Config, tmp_path: Path):
+    """full 档跑通整条链路：请求正文和模型返回都进 stderr，stdout 只有正文。"""
+    out, err = io.StringIO(), io.StringIO()
+
+    def factory(name: str, profile: Profile) -> FakeLLM:
+        return FakeLLM([{"content": "答案", "reasoning": "想想"}], name=name, profile=profile)
+
+    frontend = Headless(config, cwd=tmp_path, llm_factory=factory, out=out, err=err, debug="full")
+    assert await frontend.run("干活") == 0
+
+    text = err.getvalue()
+    assert "messages" in text and "│ 干活" in text  # 请求正文里能看到用户那句话
+    assert "\n   message\n" in text and "答案" in text  # 响应正文
+    assert "└ reasoning · 2 B" in text  # 没有工具调用时 reasoning 是最后一块
+    assert "答案" in out.getvalue()  # stdout 仍是流式正文，debug 行不混进去
 
 
 async def test_debug_off_leaves_output_untouched(config: Config, tmp_path: Path):

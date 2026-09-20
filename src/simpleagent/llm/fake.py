@@ -19,13 +19,15 @@ from typing import Any
 
 from simpleagent.config import Profile
 from simpleagent.events import (
+    REASONING_KEY,
     ApiRequest,
     ApiResponse,
     Event,
     MessageDone,
     Usage,
+    message_outline,
 )
-from simpleagent.llm.client import REASONING_KEY, StreamAccumulator, message_outline
+from simpleagent.llm.client import StreamAccumulator, collect_tool_names
 
 Script = str | dict[str, Any] | Exception
 
@@ -91,6 +93,8 @@ class FakeLLM:
             len(tools or []),
             len(json.dumps(messages, ensure_ascii=False).encode("utf-8")),
             message_outline(messages),
+            sent=messages,
+            tool_names=collect_tool_names(tools or []),
         )
         if not self.responses:
             raise AssertionError("FakeLLM 的脚本已经用完")
