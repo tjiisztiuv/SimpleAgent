@@ -230,6 +230,8 @@ class LLMClient:
             len(json.dumps(request, ensure_ascii=False).encode("utf-8")),
             message_outline(request["messages"]),
             self.request_options(),
+            # 与 trace 落盘的一致：extra_body 会被 SDK 合并到顶层
+            {**request, **self.profile.extra_body},
         )
 
         try:

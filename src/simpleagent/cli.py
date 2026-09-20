@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         choices=DEBUG_LEVELS,
         metavar="LEVEL",
-        help="显示 API 与工具调用的过程（on / verbose），输出走 stderr",
+        help="显示 API 与工具调用的过程（on / verbose / full），输出走 stderr",
     )
     parser.add_argument("-m", "--profile", help="模型 profile，默认取配置里的 default_profile")
     parser.add_argument(

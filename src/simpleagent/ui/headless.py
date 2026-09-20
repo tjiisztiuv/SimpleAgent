@@ -69,7 +69,7 @@ class Headless:
         session: Session | None = None,
         store: SessionStore | None = None,
         err: TextIO | None = None,
-        debug: str | None = None,  # off / on / verbose；不给就听配置的
+        debug: str | None = None,  # off / on / verbose / full；不给就听配置的
     ) -> None:
         self.config = config
         self.out = out or sys.stdout
@@ -121,13 +121,21 @@ class Headless:
         debug = (
             None
             if self.debug == "off"
-            else DebugRenderer(inner, self.err, self.err_color, verbose=self.debug == "verbose")
+            else DebugRenderer(
+                inner,
+                self.err,
+                self.err_color,
+                level=self.debug,
+                body_chars=self.config.debug.body_chars,
+            )
         )
         try:
             async for event in self.agent.run(self.session, prompt):
                 if isinstance(event, MessageDone):
-                    # 统计在 ApiResponse 行里已经打过了
-                    if debug is None:
+                    # 统计在 ApiResponse 行里已经打过了；full 档还要打模型返回的结构
+                    if debug is not None:
+                        debug.on_event(event)
+                    else:
                         self._write(f"\n{format_usage(event, model)}\n")
                 elif isinstance(event, MaxStepsReached):
                     self._write(f"\n[达到 max_steps={event.max_steps}，本轮停止]\n")

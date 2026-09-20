@@ -316,3 +316,54 @@ uv run sa run --debug "..."  # headless 同样输出
 - 中断路径的 `ApiResponse(status="cancelled")` **可能发不出来**：异步生成器在被取消的那一刻
   `yield` 会再抛一次 `CancelledError`。client 里把这次 `yield` 包在 `try/except` 里吞掉，
   保证原异常照常传播；测试对此用宽松断言（凡是发出的都标成 cancelled，绝不标成 ok/error）。
+
+---
+
+## 10. 追加：`full` 档（看清具体输入和返回）
+
+第 8 节定下的「verbose 只打结构，正文去 traces/ 看」保留不变，正文放进**新增的第四档 `full`**：
+verbose 那种一行摘要（`msgs system 412B · user 28B`）还有用——排查上下文膨胀时不想被正文刷屏，
+而且只有长度没有内容，贴给别人也安全。
+
+| 档 | 请求侧 | 响应侧 |
+|---|---|---|
+| on | URL / model / msgs / tools / 大小 | 状态码 / 耗时 / ttft / token / finish_reason |
+| verbose | 再加消息清单（role + 字符数）、请求开关 | 同上 |
+| **full** | 再加**实际发出的消息正文**和工具清单 | 再加**模型返回的结构**（思考 / 正文 / 工具调用 / usage） |
+
+### 10.1 取舍
+
+1. **payload 挂在 `ApiRequest` 上，开关仍在渲染层。** 沿用取舍 1：挂的是请求体的**引用**，
+   不拷贝也不额外序列化（`payload_bytes` 那次 `json.dumps` 本来就有），off 档零成本，
+   `/debug full` 中途打开也立刻有东西看。
+2. **不新增事件类型。** 响应侧用现成的 `MessageDone.message`——它已经是完整的 assistant
+   消息（`content` / `reasoning_content` / `tool_calls`），只是原来被前端拦在 `debug.on_event()`
+   之前，现在 debug 非 off 时交给渲染器。
+3. **只打新增的消息。** 历史是往后追加的，每轮重打整段上下文三轮之后就没法看了。
+   渲染器记住上次打到第几条，之后只打尾部新增的，前面用 `（前 N 条同上次）` 带过；
+   条数变少（`/clear`、换会话、换档）就重新打全量。工具清单同理，签名没变就只报个数。
+4. **工具只打名字 + 参数字段名**（`glob(pattern,path,limit)`）。完整 JSON Schema 几千字符
+   且基本不变，要看去 `traces/`；这里只要能确认「这轮带了哪些工具、签名对不对」。
+5. **工具参数解析不了就原样打并标 `⚠ 参数不是合法 JSON`。** 这一路正是最值得看的——
+   模型吐了半截 JSON 时，原来的单行 `shorten()` 预览会把它糊过去。
+6. **不进 SSE 帧。** 一轮请求体几十上百 KB，每步推给客户端会把总线撑爆，而客户端 UI
+   还没承接这块。桌面端要看正文，以后单独设计一个按需拉取的接口。
+7. **`body_chars` 是唯一的闸门。** 每段正文按字符数截（默认 600，0 = 不截），再按 12 行截；
+   单行不另外裁剪，超宽的行交给终端折行——看到的就是真实发出去的样子。
+
+### 10.2 顺带修的两处
+
+- `debug_level()` 原来 `enabled=false` 时直接返回 `off`，和 `DebugConfig` 文档里「verbose 隐含
+  enabled」的说法对不上（`config.example.toml` 的示例正好是这个写法，写了等于没写）。
+  现在 `full` 隐含 `verbose`，`verbose` 隐含 `enabled`。
+- `api_response()` 之前不收尾正文，流式输出的最后一段会和 `⟨ 200` 挤在同一行；
+  现在先 `inner.end()` 再写 stderr。
+
+### 10.3 实施记录
+
+| 改动 | 文件 | 状态 |
+|---|---|---|
+| `ApiRequest.payload` | `events.py`、`llm/client.py`、`llm/fake.py` | ✅ |
+| `full` 档渲染（请求体 / 响应结构 / 增量） | `ui/debug.py` | ✅ |
+| 档位与开关 | `config.py`、`config.example.toml`、`cli.py`、`ui/repl.py`、`ui/headless.py` | ✅ |
+| 测试 | `tests/test_debug.py`（新增 10 个用例，共 26 个） | ✅ |

@@ -22,6 +22,8 @@ max_lines = 500     # 行数上限（两个上限都要满足）；完整内容�
 # [debug]
 # enabled = false   # 交互时显示 API 调用和工具调用的过程（也可 sa --debug、REPL 里 /debug on）
 # verbose = true    # 再加每轮的消息清单（role + 字符数）和请求开关；过程输出走 stderr
+# full = true       # 再加发给模型的消息正文和模型返回的结构；正文会进 stderr，日志别外传
+# body_chars = 600  # full 档里每段正文的字符上限，0 = 不截断
 
 # [panel]
 # archive_after_minutes = 30   # 控制面板的消息点开后多久移进归档；没点开的不会自动归档
