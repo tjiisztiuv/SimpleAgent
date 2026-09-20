@@ -56,7 +56,7 @@ DIM, RED, BOLD, RESET = "\033[2m", "\033[31m", "\033[1m", "\033[0m"
 HELP = '''命令：
   /model [name]   查看或切换模型 profile（对话历史保留）
   /tools          列出当前可用的工具
-  /debug [LEVEL]  查看或切换 debug：off / on / verbose（过程输出走 stderr）
+  /debug [LEVEL]  查看或切换 debug：off / on / verbose / full（过程输出走 stderr）
   /clear          清空对话历史
   /usage          本会话的 token 用量
   /help           显示帮助
@@ -292,15 +292,18 @@ class Repl:
         debug = (
             None
             if self.debug == "off"
-            else DebugRenderer(renderer, self.err, self.err_color, verbose=self.debug == "verbose")
+            else DebugRenderer(renderer, self.err, self.err_color, level=self.debug)
         )
         try:
             async for event in self.agent.run(self.session, text):
                 if isinstance(event, MessageDone):
                     renderer.end()
-                    # 统计在 ApiResponse 行里已经打过了，debug 模式下不重复
                     if debug is None:
+                        # 统计在 ApiResponse 行里已经打过了，debug 模式下不重复
                         self.print(format_stats(event, self.agent.llm.profile.model), DIM)
+                    else:
+                        # full 档要从这条消息里取模型的返回内容，不能在这里吃掉
+                        debug.on_event(event)
                 elif isinstance(event, MaxStepsReached):
                     self.print(
                         f"[达到 max_steps={event.max_steps}，本轮停止；输入“继续”可以接着做]", DIM

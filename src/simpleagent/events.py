@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
+
+# 会话历史里统一用这个字段保存思考内容；发请求时再按 profile 改名或去掉
+REASONING_KEY = "reasoning_content"
 
 
 @dataclass
@@ -49,9 +53,31 @@ class Usage:
         )
 
 
+def message_outline(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """每条消息的 role 和字符数，用来找「哪一条把上下文撑大了」。
+
+    只算长度不带正文：正文归 debug 的 full 档展开，或者去 traces/ 看全文。
+    """
+    outline = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            chars = len(content)
+        elif content:
+            chars = len(json.dumps(content, ensure_ascii=False))
+        else:
+            chars = 0
+        # 带 tool_calls 的消息通常 content 是空的，光看 content 会低估它占的地方
+        chars += sum(
+            len(json.dumps(call, ensure_ascii=False)) for call in message.get("tool_calls") or []
+        )
+        outline.append({"role": message.get("role", "?"), "chars": chars})
+    return outline
+
+
 @dataclass
 class ApiRequest:
-    """一次 LLM 请求发出前。只带摘要：不含 header、不含 key、不含请求体正文。
+    """一次 LLM 请求发出前。不含 header，因此也不含 API key。
 
     messages / tools / payload_bytes 用来观察「这次到底发了多少东西」，
     排查上下文膨胀和工具列表变化时最直观。
@@ -67,6 +93,11 @@ class ApiRequest:
     outline: list[dict[str, Any]] = field(default_factory=list)
     # 非默认的协议开关；extra_body 只放键名，值可能是厂商私有参数
     options: dict[str, Any] = field(default_factory=dict)
+    # 真正发出去的消息（prepare_messages 之后），debug 的 full 档展开它的正文。
+    # 与 outline 同源、顺序一一对应：两个字段都由同一个 messages 列表构造
+    sent: list[dict[str, Any]] = field(default_factory=list)
+    # 这次带上了哪些工具；只有名字，schema 全文去 traces/ 看
+    tool_names: list[str] = field(default_factory=list)
 
 
 @dataclass

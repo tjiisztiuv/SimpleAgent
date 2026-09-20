@@ -22,6 +22,7 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from simpleagent.config import Profile, Quirks
 from simpleagent.events import (
+    REASONING_KEY,
     ApiRequest,
     ApiResponse,
     Event,
@@ -29,11 +30,14 @@ from simpleagent.events import (
     ReasoningDelta,
     TextDelta,
     Usage,
+    message_outline,
 )
 from simpleagent.trace import Tracer
 
-# 会话历史里统一用这个字段保存思考内容；发请求时再按 profile 改名或去掉
-REASONING_KEY = "reasoning_content"
+
+def collect_tool_names(tools: list[dict[str, Any]]) -> list[str]:
+    """工具名清单；debug 的 full 档用它显示这一轮带了哪些工具。"""
+    return [(tool.get("function") or {}).get("name") or "?" for tool in tools]
 
 
 class LLM(Protocol):
@@ -128,28 +132,6 @@ def prepare_messages(messages: list[dict[str, Any]], quirks: Quirks) -> list[dic
     return prepared
 
 
-def message_outline(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """每条消息的 role 和字符数；debug 的 verbose 档用它显示上下文构成。
-
-    只统计长度，不带正文：正文可能有敏感内容，要看全文去 traces/。
-    """
-    outline = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str) and content:
-            chars = len(content)
-        elif content:
-            chars = len(json.dumps(content, ensure_ascii=False))
-        else:
-            chars = 0
-        # 带 tool_calls 的消息通常 content 是空的，光看 content 会低估它占的地方
-        chars += sum(
-            len(json.dumps(call, ensure_ascii=False)) for call in message.get("tool_calls") or []
-        )
-        outline.append({"role": message.get("role", "?"), "chars": chars})
-    return outline
-
-
 def is_loopback(url: str) -> bool:
     host = urlsplit(url).hostname or ""
     if host == "localhost":
@@ -230,6 +212,8 @@ class LLMClient:
             len(json.dumps(request, ensure_ascii=False).encode("utf-8")),
             message_outline(request["messages"]),
             self.request_options(),
+            sent=request["messages"],
+            tool_names=collect_tool_names(tools or []),
         )
 
         try:

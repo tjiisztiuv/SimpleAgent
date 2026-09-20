@@ -290,7 +290,7 @@ uv run sa run --debug "..."  # headless 同样输出
 
 1. **verbose 只打结构，不打正文**：`msgs system 412B · user 28B · assistant 96B · tool 312B`，
    外加 `opts stream_usage=true · parallel_tool_calls=true · extra_body=thinking`（extra_body 只放键名）。
-   要看请求体全文去 `traces/`。
+   要看请求体全文去 `traces/`——或者切到后来的 full 档（见第 10 节）。
 2. **debug 行走 stderr，正文走 stdout**：这样 `sa run --debug 2>debug.log` 能把过程单独存一份，
    正文仍可以管道给别的程序。代价是 stdout 通常是块缓冲，写 debug 行前要先 `flush()` 一次，
    否则两个流合起来看会乱序（`DebugRenderer._write` 里做了）。
@@ -316,3 +316,78 @@ uv run sa run --debug "..."  # headless 同样输出
 - 中断路径的 `ApiResponse(status="cancelled")` **可能发不出来**：异步生成器在被取消的那一刻
   `yield` 会再抛一次 `CancelledError`。client 里把这次 `yield` 包在 `try/except` 里吞掉，
   保证原异常照常传播；测试对此用宽松断言（凡是发出的都标成 cancelled，绝不标成 ok/error）。
+
+---
+
+## 10. 后续扩展：full 档（2026-09-20）
+
+前三档都只看得到结构，`traces/` 又是另一套 JSON 文件。想在终端里直接读「发给模型的到底是什么」
+和「模型到底回了什么」时，两边都够不着。加第四档 `full` 补上。
+
+### 10.1 档位
+
+| 档 | 显示内容 |
+|---|---|
+| off（默认） | 和现在完全一样 |
+| on | API 行（URL / model / msgs / tools / 大小 → 状态码 / 耗时 / ttft / token）、工具行（名 + 参数 + 权限 + 耗时 + 结果行数）、错误高亮 |
+| verbose | 再加每轮的消息清单（role + 字符数）、请求开关 |
+| full | 再加真正发出去的 messages 正文，以及返回的 content / reasoning / tool_calls |
+
+正文只在 full 出现：它可能几十 KB，也可能含工具读到的文件内容，不该在顺手开的档位里刷屏。
+
+### 10.2 输出形态
+
+```
+── 轮 1 ────────────────────────────────────────────
+⟩ API    POST https://api.deepseek.com/chat/completions
+       deepseek-chat · 4 msgs · 7 tools · 977 B
+       opts  stream_usage=True
+       messages
+         [0] system · 155 B
+         │ 你是 SimpleAgent，一个运行在用户本地电脑上的个人助手。回答简洁、准确。
+         [1] user · 8 B
+         │ 这个仓库里有啥？
+         [2] assistant · 104 B
+         │ 先看一眼目录。
+         │ （另有 1 个工具调用）
+         [3] tool · 268 B
+         │ .claude/
+         │ docs/
+       tools  list_dir · read_file · bash
+⟨ 200
+   1.32s · ttft 0.41s · in 3,412(缓存 1,024) · out 256 → tool_calls
+   message
+   ├ content
+   │ 先看一眼目录。
+   ├ reasoning · 31 B
+   │ 用户问仓库里有什么，list_dir 最直接。
+   └ tool_calls · 1 个
+     1. list_dir
+        {
+          "depth": 1
+        }
+```
+
+### 10.3 取舍
+
+**正文只加字段、不加事件。** `ApiRequest` 加 `sent` / `tool_names`，传的是 `build_request` 里
+那个列表的引用——不复制、不额外序列化（`payload_bytes` 本来就要 `json.dumps` 一次），
+所以非 full 档的产出成本和加字段前一样。
+
+**响应侧不动 `ApiResponse`。** assistant 消息已经在 `MessageDone.message` 里，再往 `ApiResponse`
+塞一份会让同一份内容在事件流里出现两次（SSE 那边还有 `message_done` 帧）。改成让
+`DebugRenderer` 接管 `MessageDone`——注意它在 REPL / headless 里原本被提前消费掉，
+这次一并改成 debug 开着时转给 debug 渲染器。
+
+**失败和中断没有响应正文。** 本来就没有完整的返回内容；中断时那半截正文已经流式打在
+stdout 上了，不重复。
+
+**每条正文 30 行、单行 200 字符。** 超出提示「…还有 N 行（全文见 trace）」——trace 里存的是
+同一份内容，指路比截断后让人猜更有用。
+
+**`message_outline()` / `REASONING_KEY` 挪到 `events.py`。** full 档要按条显示消息大小、
+要从返回里取思考内容，这两个符号原本住在 `llm/client.py`。挪到事件层后 UI 侧不必为了算个
+字符数去导入 openai 客户端，语义上也更对：它们描述的就是事件里的字段。
+
+**`DebugRenderer` 的构造参数由 `verbose: bool` 改成 `level: str`。** 两个布尔位没法表达四档，
+三处调用点（repl / headless / 测试）同步改。

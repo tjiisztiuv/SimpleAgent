@@ -137,6 +137,7 @@ class DebugConfig(BaseModel):
     """交互时的 debug 输出：显示 API 调用和工具调用的详细过程。
 
     输出走 stderr，和正文分开，可以 `2>debug.log` 单独存一份。
+    full 是最高的档，单独打开就生效；enabled / verbose 是递进关系。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -145,6 +146,9 @@ class DebugConfig(BaseModel):
     # on 档再加：每轮的消息清单（role + 字符数）、请求体里的非默认开关。
     # 只打结构不打正文，正文去 traces/ 看。
     verbose: bool = False
+    # full 档再加：真正发出去的 messages 正文和模型的返回内容（含思考、工具调用）。
+    # 正文可能很长，也可能含工具读到的文件内容，所以单独一档、不并进 verbose。
+    full: bool = False
 
 
 class PanelConfig(BaseModel):

@@ -121,14 +121,17 @@ class Headless:
         debug = (
             None
             if self.debug == "off"
-            else DebugRenderer(inner, self.err, self.err_color, verbose=self.debug == "verbose")
+            else DebugRenderer(inner, self.err, self.err_color, level=self.debug)
         )
         try:
             async for event in self.agent.run(self.session, prompt):
                 if isinstance(event, MessageDone):
-                    # 统计在 ApiResponse 行里已经打过了
                     if debug is None:
+                        # 统计在 ApiResponse 行里已经打过了
                         self._write(f"\n{format_usage(event, model)}\n")
+                    else:
+                        # full 档要从这条消息里取模型的返回内容，不能在这里吃掉
+                        debug.on_event(event)
                 elif isinstance(event, MaxStepsReached):
                     self._write(f"\n[达到 max_steps={event.max_steps}，本轮停止]\n")
                 elif debug is not None:
