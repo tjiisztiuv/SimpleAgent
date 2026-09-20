@@ -8,7 +8,15 @@ from pydantic import BaseModel
 
 from simpleagent.agent.loop import INTERRUPTED_RESULT, Agent
 from simpleagent.agent.session import Session
-from simpleagent.events import MaxStepsReached, MessageDone, TextDelta, ToolCallStart, ToolResult
+from simpleagent.events import (
+    ApiRequest,
+    ApiResponse,
+    MaxStepsReached,
+    MessageDone,
+    TextDelta,
+    ToolCallStart,
+    ToolResult,
+)
 from simpleagent.llm.fake import FakeLLM, Script
 from simpleagent.tools import Tool, ToolContext, ToolRegistry, builtin_tools, tool
 
@@ -51,7 +59,9 @@ async def test_tool_call_round_trip(tmp_path: Path):
     session = Session("s")
     events = await collect(agent, session, "当前目录有什么？")
 
-    assert [type(e) for e in events if not isinstance(e, TextDelta)] == [
+    # API 事件每次请求成对出现，这里只比较对话事件
+    assert [e.step for e in events if isinstance(e, ApiRequest)] == [1, 2]
+    assert [type(e) for e in events if not isinstance(e, TextDelta | ApiRequest | ApiResponse)] == [
         MessageDone,
         ToolCallStart,
         ToolResult,

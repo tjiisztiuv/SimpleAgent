@@ -10,17 +10,26 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx2
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from simpleagent.config import Profile, Quirks
-from simpleagent.events import Event, MessageDone, ReasoningDelta, TextDelta, Usage
+from simpleagent.events import (
+    ApiRequest,
+    ApiResponse,
+    Event,
+    MessageDone,
+    ReasoningDelta,
+    TextDelta,
+    Usage,
+)
 from simpleagent.trace import Tracer
 
 # 会话历史里统一用这个字段保存思考内容；发请求时再按 profile 改名或去掉
@@ -32,7 +41,10 @@ class LLM(Protocol):
     profile: Profile
 
     def stream(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        step: int = 0,  # 本轮对话的第几次请求，只在 debug 输出里用来标号
     ) -> AsyncIterator[Event]: ...
 
     async def close(self) -> None: ...
@@ -116,6 +128,28 @@ def prepare_messages(messages: list[dict[str, Any]], quirks: Quirks) -> list[dic
     return prepared
 
 
+def message_outline(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """每条消息的 role 和字符数；debug 的 verbose 档用它显示上下文构成。
+
+    只统计长度，不带正文：正文可能有敏感内容，要看全文去 traces/。
+    """
+    outline = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            chars = len(content)
+        elif content:
+            chars = len(json.dumps(content, ensure_ascii=False))
+        else:
+            chars = 0
+        # 带 tool_calls 的消息通常 content 是空的，光看 content 会低估它占的地方
+        chars += sum(
+            len(json.dumps(call, ensure_ascii=False)) for call in message.get("tool_calls") or []
+        )
+        outline.append({"role": message.get("role", "?"), "chars": chars})
+    return outline
+
+
 def is_loopback(url: str) -> bool:
     host = urlsplit(url).hostname or ""
     if host == "localhost":
@@ -148,6 +182,10 @@ class LLMClient:
             http_client=http_client,
         )
 
+    def endpoint(self) -> str:
+        """实际的请求地址，只用于 debug 显示（不含 key、不含请求体）。"""
+        return urljoin(self.profile.base_url.rstrip("/") + "/", "chat/completions")
+
     def build_request(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
@@ -170,7 +208,10 @@ class LLMClient:
         return request
 
     async def stream(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        step: int = 0,
     ) -> AsyncIterator[Event]:
         request = self.build_request(messages, tools)
         accumulator = StreamAccumulator(self.profile.quirks.reasoning_field)
@@ -180,6 +221,16 @@ class LLMClient:
         started_at = datetime.now().isoformat(timespec="seconds")
         start = time.monotonic()
         ttft: float | None = None
+        yield ApiRequest(
+            step,
+            self.endpoint(),
+            self.profile.model,
+            len(request["messages"]),
+            len(tools or []),
+            len(json.dumps(request, ensure_ascii=False).encode("utf-8")),
+            message_outline(request["messages"]),
+            self.request_options(),
+        )
 
         try:
             stream = await self._client.chat.completions.create(
@@ -204,15 +255,63 @@ class LLMClient:
                 else "error"
             )
             self._trace(request, accumulator, raw_chunks, started_at, start, ttft, status, e)
+            # GeneratorExit（消费方提前退出、aclose）期间不能再 yield：async generator
+            # 关闭时 yield 会被判成 "ignored GeneratorExit"，把错误甩给调用方。
+            # CancelledError 时 yield 是安全的，事件能送到还在迭代的消费方；
+            # 至于它会不会被送到，取决于消费方有没有一起被取消，这里不保证。
+            if not isinstance(e, GeneratorExit):
+                try:
+                    yield self._response(step, status, start, ttft, error=e)
+                except BaseException:  # noqa: BLE001
+                    pass
             raise
 
         self._trace(request, accumulator, raw_chunks, started_at, start, ttft, "ok")
+        yield self._response(step, "ok", start, ttft, accumulator)
         yield MessageDone(
             message=accumulator.message(),
             finish_reason=accumulator.finish_reason,
             usage=Usage.from_dict(accumulator.usage) if accumulator.usage else None,
             ttft=ttft,
             elapsed=time.monotonic() - start,
+        )
+
+    def request_options(self) -> dict[str, Any]:
+        """影响请求体的非默认开关；debug 时打出来，排查各家差异最快。
+
+        extra_body 只放键名：值可能是厂商私有参数，也可能夹带敏感内容。
+        """
+        quirks = self.profile.quirks
+        options: dict[str, Any] = {
+            "stream_usage": quirks.stream_usage,
+            "parallel_tool_calls": quirks.parallel_tool_calls,
+        }
+        if self.profile.extra_body:
+            options["extra_body"] = sorted(self.profile.extra_body)
+        return options
+
+    def _response(
+        self,
+        step: int,
+        status: str,
+        start: float,
+        ttft: float | None,
+        accumulator: StreamAccumulator | None = None,
+        error: BaseException | None = None,
+    ) -> ApiResponse:
+        return ApiResponse(
+            step,
+            status,
+            time.monotonic() - start,
+            ttft,
+            status_code=None if error is None else getattr(error, "status_code", None),
+            error=None if error is None else f"{type(error).__name__}: {error}",
+            usage=(
+                Usage.from_dict(accumulator.usage)
+                if accumulator is not None and accumulator.usage
+                else None
+            ),
+            finish_reason=None if accumulator is None else accumulator.finish_reason,
         )
 
     def _trace(

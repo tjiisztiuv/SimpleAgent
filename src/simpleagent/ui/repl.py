@@ -8,7 +8,6 @@ Runner 会把 Ctrl+C 转成当前任务的 CancelledError，Agent.run() 收到�
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +39,12 @@ from simpleagent.permissions import Approver, Policy
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
 from simpleagent.ui.approve import ConsoleApprover
+from simpleagent.ui.debug import (
+    DEBUG_LEVELS,
+    DebugRenderer,
+    debug_level,
+    supports_color,
+)
 
 try:
     import readline  # noqa: F401  让 input() 支持方向键和输入历史
@@ -51,6 +56,7 @@ DIM, RED, BOLD, RESET = "\033[2m", "\033[31m", "\033[1m", "\033[0m"
 HELP = '''命令：
   /model [name]   查看或切换模型 profile（对话历史保留）
   /tools          列出当前可用的工具
+  /debug [LEVEL]  查看或切换 debug：off / on / verbose（过程输出走 stderr）
   /clear          清空对话历史
   /usage          本会话的 token 用量
   /help           显示帮助
@@ -61,10 +67,6 @@ Ctrl+C 中断当前回复，Ctrl+D 退出。'''
 TOOL_PREVIEW_LINES = 5  # 工具结果在终端里预览的行数；完整内容在 trace 里
 
 LLMFactory = Callable[[str, Profile], LLM]
-
-
-def _supports_color(out: TextIO) -> bool:
-    return hasattr(out, "isatty") and out.isatty() and not os.environ.get("NO_COLOR")
 
 
 def format_stats(done: MessageDone, model: str) -> str:
@@ -131,11 +133,12 @@ class Renderer:
                 self._write("思考：", DIM)
                 self.mode = "reasoning"
             self._write(event.text, DIM)
-        else:
+        elif isinstance(event, TextDelta):
             if self.mode == "reasoning":
                 self._write("\n\n")
             self.mode = "text"
             self._write(event.text)
+        # 其余事件（ApiRequest / ApiResponse）只出现在 debug 输出里，普通渲染不处理
 
     def tool_start(self, event: ToolCallStart) -> None:
         self.end()
@@ -172,10 +175,15 @@ class Repl:
         store: SessionStore | None = None,
         approver: Approver | None = None,
         policy: Policy | None = None,
+        err: TextIO | None = None,
+        debug: str | None = None,  # off / on / verbose；不给就听配置的
     ):
         self.config = config
         self.out = out or sys.stdout
-        self.color = _supports_color(self.out)
+        self.err = err or sys.stderr
+        self.color = supports_color(self.out)
+        self.err_color = supports_color(self.err)
+        self.debug = debug or debug_level(config)
         self.input_fn = input_fn
         self.store = store
         self.session = session or Session(new_session_id())
@@ -234,6 +242,8 @@ class Repl:
             )
         if self.config.trace.enabled:
             self.print(f"trace：{self.tracer.dir}", DIM)
+        if self.debug != "off":
+            self.print(f"debug：{self.debug}，API 与工具调用的过程输出走 stderr", DIM)
         self.print("输入 /help 查看命令", DIM)
         with asyncio.Runner() as runner:
             try:
@@ -278,15 +288,25 @@ class Repl:
     async def chat(self, text: str) -> None:
         # 历史的维护（包括中断、出错后的修复）都在 Agent.run() 里，这里只负责显示
         renderer = Renderer(self.out, self.color, self.config.show_reasoning)
+        # debug 行走 stderr，正文走 stdout：互不干扰，也方便 2> 单独存一份
+        debug = (
+            None
+            if self.debug == "off"
+            else DebugRenderer(renderer, self.err, self.err_color, verbose=self.debug == "verbose")
+        )
         try:
             async for event in self.agent.run(self.session, text):
                 if isinstance(event, MessageDone):
                     renderer.end()
-                    self.print(format_stats(event, self.agent.llm.profile.model), DIM)
+                    # 统计在 ApiResponse 行里已经打过了，debug 模式下不重复
+                    if debug is None:
+                        self.print(format_stats(event, self.agent.llm.profile.model), DIM)
                 elif isinstance(event, MaxStepsReached):
                     self.print(
                         f"[达到 max_steps={event.max_steps}，本轮停止；输入“继续”可以接着做]", DIM
                     )
+                elif debug is not None:
+                    debug.on_event(event)
                 else:
                     renderer.on_event(event)
         except asyncio.CancelledError:
@@ -323,9 +343,24 @@ class Repl:
                     function = item["function"]
                     self.print(f"  {function['name']}", BOLD)
                     self.print(f"      {function['description']}")
+            case "debug":
+                self._set_debug(arg)
             case _:
                 self.print(f"未知命令 /{name}，输入 /help 查看")
         return True
+
+    def _set_debug(self, level: str) -> None:
+        if not level:
+            self.print(f"debug：{self.debug}（可选 {' / '.join(DEBUG_LEVELS)}）", DIM)
+            return
+        if level not in DEBUG_LEVELS:
+            self.print(f"用法：/debug [{' | '.join(DEBUG_LEVELS)}]", RED)
+            return
+        self.debug = level
+        self.print(
+            f"debug：{level}" + ("" if level == "off" else "，过程输出走 stderr"),
+            DIM,
+        )
 
     async def _switch_model(self, name: str) -> None:
         if not name:

@@ -8,7 +8,7 @@ import openai
 import pytest
 
 from simpleagent.config import Profile, Quirks
-from simpleagent.events import MessageDone, ReasoningDelta, TextDelta
+from simpleagent.events import ApiRequest, MessageDone, ReasoningDelta, TextDelta
 from simpleagent.llm.client import LLMClient, is_loopback
 from simpleagent.trace import Tracer
 
@@ -88,8 +88,14 @@ async def test_stream_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert body["max_tokens"] == 256
     assert "reasoning_content" not in body["messages"][1]
 
-    # 事件流：SDK 保留了非标准字段 reasoning_content
-    assert events[:3] == [ReasoningDelta("想"), TextDelta("你好"), TextDelta("！")]
+    # 事件流：开头是 API 事件，之后才是 SDK 保留的非标准字段 reasoning_content
+    request = events[0]
+    assert isinstance(request, ApiRequest)
+    assert request.url == "http://llm.invalid/v1/chat/completions"
+    assert request.messages == 3
+    # extra_body 只放键名，值可能是厂商私有参数
+    assert request.options["extra_body"] == ["thinking"]
+    assert events[1:4] == [ReasoningDelta("想"), TextDelta("你好"), TextDelta("！")]
     done = events[-1]
     assert isinstance(done, MessageDone)
     assert done.message == {"role": "assistant", "content": "你好！", "reasoning_content": "想"}
@@ -155,6 +161,7 @@ async def test_consumer_stopping_early_is_traced_as_cancelled(
 
     client = make_client(handler, tmp_path, monkeypatch)
     stream = client.stream([{"role": "user", "content": "hi"}])
+    assert isinstance(await anext(stream), ApiRequest)
     assert await anext(stream) == TextDelta("一")
     await stream.aclose()
     await client.close()

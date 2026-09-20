@@ -60,10 +60,10 @@ class Agent:
         )
         partial: list[str] = []  # 本次请求已经输出的正文，中断时保存
         try:
-            for _ in range(self.max_steps):
+            for step in range(1, self.max_steps + 1):
                 request = [{"role": "system", "content": self.system_prompt}, *session.messages]
                 done: MessageDone | None = None
-                async for event in self.llm.stream(request, tools=self.tools.schemas()):
+                async for event in self.llm.stream(request, tools=self.tools.schemas(), step=step):
                     if isinstance(event, TextDelta):
                         partial.append(event.text)
                     elif isinstance(event, MessageDone):
@@ -80,10 +80,16 @@ class Agent:
                     return  # 模型没有调用工具，这一轮结束
                 for call in tool_calls:
                     function = call.get("function") or {}
+                    name = function.get("name") or ""
+                    # 未知工具按只读、默认等级上报：它只会得到一条错误结果
+                    known = self.tools.get(name)
                     yield ToolCallStart(
                         call.get("id") or "",
-                        function.get("name") or "",
+                        name,
                         function.get("arguments") or "",
+                        step=step,
+                        permission="allow" if known is None else known.permission,
+                        readonly=self.tools.is_readonly(name),
                     )
                 # 结果按 tool_calls 的顺序回传；全是只读就并行，含写操作就依次执行。
                 # 每批结果先记进历史再往外发：中途被中断时，已执行完的调用保留真实结果

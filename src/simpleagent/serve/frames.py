@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 from simpleagent.events import (
+    ApiRequest,
+    ApiResponse,
     Event,
     MaxStepsReached,
     MessageDone,
@@ -27,6 +29,38 @@ def event_to_frame(event: Event, session_id: str) -> Frame:
         return Frame(session_id, "text_delta", {"text": event.text})
     if isinstance(event, ReasoningDelta):
         return Frame(session_id, "reasoning_delta", {"text": event.text})
+    if isinstance(event, ApiRequest):
+        return Frame(
+            session_id,
+            "api_request",
+            {
+                "step": event.step,
+                "url": event.url,
+                "model": event.model,
+                "messages": event.messages,
+                "tools": event.tools,
+                "payload_bytes": event.payload_bytes,
+                "options": event.options,
+            },
+        )
+    if isinstance(event, ApiResponse):
+        response_payload: dict[str, Any] = {
+            "step": event.step,
+            "status": event.status,
+            "elapsed": round(event.elapsed, 3),
+            "ttft": None if event.ttft is None else round(event.ttft, 3),
+            "status_code": event.status_code,
+            "error": event.error,
+            "finish_reason": event.finish_reason,
+        }
+        if event.usage is not None:
+            response_payload["usage"] = {
+                "prompt_tokens": event.usage.prompt_tokens,
+                "completion_tokens": event.usage.completion_tokens,
+                "cached_tokens": event.usage.cached_tokens,
+                "reasoning_tokens": event.usage.reasoning_tokens,
+            }
+        return Frame(session_id, "api_response", response_payload)
     if isinstance(event, MessageDone):
         payload: dict[str, Any] = {
             "message": event.message,
@@ -44,7 +78,14 @@ def event_to_frame(event: Event, session_id: str) -> Frame:
         return Frame(
             session_id,
             "tool_call_start",
-            {"call_id": event.call_id, "name": event.name, "arguments": event.arguments},
+            {
+                "call_id": event.call_id,
+                "name": event.name,
+                "arguments": event.arguments,
+                "step": event.step,
+                "permission": event.permission,
+                "readonly": event.readonly,
+            },
         )
     if isinstance(event, ToolResult):
         return Frame(
@@ -55,6 +96,9 @@ def event_to_frame(event: Event, session_id: str) -> Frame:
                 "name": event.name,
                 "content": event.content,
                 "is_error": event.is_error,
+                "duration_ms": round(event.duration_ms, 1),
+                "decision": event.decision,
+                "truncated": event.truncated,
             },
         )
     if isinstance(event, MaxStepsReached):

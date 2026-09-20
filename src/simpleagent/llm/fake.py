@@ -13,12 +13,19 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 from simpleagent.config import Profile
-from simpleagent.events import Event, MessageDone, Usage
-from simpleagent.llm.client import REASONING_KEY, StreamAccumulator
+from simpleagent.events import (
+    ApiRequest,
+    ApiResponse,
+    Event,
+    MessageDone,
+    Usage,
+)
+from simpleagent.llm.client import REASONING_KEY, StreamAccumulator, message_outline
 
 Script = str | dict[str, Any] | Exception
 
@@ -66,13 +73,36 @@ class FakeLLM:
         self.closed = False
 
     async def stream(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        step: int = 0,
     ) -> AsyncIterator[Event]:
-        self.requests.append({"messages": copy.deepcopy(messages), "tools": copy.deepcopy(tools)})
+        self.requests.append(
+            {"messages": copy.deepcopy(messages), "tools": copy.deepcopy(tools), "step": step}
+        )
+        # 和真实客户端产出同样的 API 事件：debug 渲染和事件序列的测试才测得到东西
+        start = time.monotonic()
+        yield ApiRequest(
+            step,
+            self.profile.base_url.rstrip("/") + "/chat/completions",
+            self.profile.model,
+            len(messages),
+            len(tools or []),
+            len(json.dumps(messages, ensure_ascii=False).encode("utf-8")),
+            message_outline(messages),
+        )
         if not self.responses:
             raise AssertionError("FakeLLM 的脚本已经用完")
         response = self.responses.pop(0)
         if isinstance(response, Exception):
+            yield ApiResponse(
+                step,
+                "error",
+                time.monotonic() - start,
+                error=f"{type(response).__name__}: {response}",
+                status_code=getattr(response, "status_code", None),
+            )
             raise response
         if isinstance(response, str):
             response = {"content": response}
@@ -82,6 +112,13 @@ class FakeLLM:
             await asyncio.sleep(response.get("delay", 0))
             for event in accumulator.feed(chunk):
                 yield event
+        yield ApiResponse(
+            step,
+            "ok",
+            time.monotonic() - start,
+            usage=Usage.from_dict(accumulator.usage) if accumulator.usage else None,
+            finish_reason=accumulator.finish_reason,
+        )
         yield MessageDone(
             message=accumulator.message(),
             finish_reason=accumulator.finish_reason,
