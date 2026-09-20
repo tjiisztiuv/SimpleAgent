@@ -221,7 +221,8 @@ src/simpleagent/
   cli.py                  ✅ argparse 入口：sa / sa init / sa run / sa sessions / sa serve / sa --resume
   config.py               ✅ TOML + 环境变量 → pydantic 配置模型
   config.example.toml     ✅ sa init 使用的配置模板
-  events.py               ✅ 事件类型（后续加 hooks 分发）
+  events.py               ✅ 事件类型（TextDelta / ReasoningDelta / ApiRequest / ApiResponse /
+                          ✅ MessageDone / ToolCallStart / ToolResult / MaxStepsReached）
   trace.py                ✅ 请求/响应全量落盘
   permissions.py          ✅ 权限：Decision / Scope / Policy（含 bash 危险命令识别）、审批器协议
   llm/client.py           ✅ 流式调用、chunk 拼接、思考内容、quirks
@@ -243,5 +244,6 @@ src/simpleagent/
   ui/repl.py              ✅ 交互式 REPL（写操作终端确认）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
   ui/approve.py           ✅ ConsoleApprover：终端 y / a / 其他键拒绝
+  ui/debug.py             ✅ debug 输出：API 调用与工具调用的过程，走 stderr（off / on / verbose）
 tests/                    ✅ 各模块对应测试
 ```

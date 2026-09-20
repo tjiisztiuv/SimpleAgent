@@ -12,6 +12,7 @@ from pathlib import Path
 from simpleagent.agent.session import SESSION_DIRNAME, Session, SessionStore
 from simpleagent.config import ConfigError, home_dir, init_config, load_config
 from simpleagent.panel.store import LEVELS
+from simpleagent.ui.debug import DEBUG_LEVELS
 
 # --resume 不给值时的哨兵：argparse 用 const 填进来，好区分「没传」和「传了但没给 id」
 LATEST = "__latest__"
@@ -92,6 +93,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-V", "--version", action="version", version=f"simpleagent {package_version()}"
     )
+    parser.add_argument(
+        "--debug",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=DEBUG_LEVELS,
+        metavar="LEVEL",
+        help="显示 API 与工具调用的过程（on / verbose），输出走 stderr",
+    )
     parser.add_argument("-m", "--profile", help="模型 profile，默认取配置里的 default_profile")
     parser.add_argument(
         "--resume",
@@ -125,6 +135,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     # 用 SUPPRESS 而不是 None：子解析器没传时不要把父级 -m/--profile 的值覆盖掉
     run.add_argument("-m", "--profile", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    run.add_argument(
+        "--debug",
+        nargs="?",
+        const="on",
+        default=argparse.SUPPRESS,
+        choices=DEBUG_LEVELS,
+        metavar="LEVEL",
+        help=argparse.SUPPRESS,
+    )
     sessions = commands.add_parser("sessions", help="列出已保存的会话")
     sessions.add_argument("--limit", type=int, default=20, help="最多显示几条，默认 20")
     inbox = commands.add_parser("inbox", help="控制面板的消息：脚本 / 例行任务往这里投结论")
@@ -188,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                 allowed_tools=parse_allowed(args.allow),
                 session=session,
                 store=store,
+                debug=getattr(args, "debug", None),
             )
             with asyncio.Runner() as runner:
                 try:
@@ -202,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             profile=args.profile,
             session=resolve_resume(store, args.resume),
             store=store,
+            debug=args.debug,
         ).run()
     except CliError as e:
         print(str(e), file=sys.stderr)

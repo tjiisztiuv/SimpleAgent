@@ -34,6 +34,8 @@ from simpleagent.llm.client import LLM, LLMClient
 from simpleagent.permissions import Policy, WhitelistApprover
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
+from simpleagent.ui.debug import DebugRenderer, debug_level, supports_color
+from simpleagent.ui.repl import Renderer
 
 LLMFactory = Callable[[str, Profile], LLM]
 
@@ -66,9 +68,14 @@ class Headless:
         out: TextIO | None = None,
         session: Session | None = None,
         store: SessionStore | None = None,
+        err: TextIO | None = None,
+        debug: str | None = None,  # off / on / verbose；不给就听配置的
     ) -> None:
         self.config = config
         self.out = out or sys.stdout
+        self.err = err or sys.stderr
+        self.err_color = supports_color(self.err)
+        self.debug = debug or debug_level(config)
         self.cwd = cwd or Path.cwd()
         self.store = store
         self.session = session or Session(new_session_id())
@@ -109,9 +116,24 @@ class Headless:
     async def run(self, prompt: str) -> int:
         """跑一个任务，返回退出码（0 正常，1 请求失败）。"""
         model = self.agent.llm.profile.model
+        # debug 行写 stderr；正文写 stdout。inner 只用来收尾正文分段和 flush，不参与渲染
+        inner = Renderer(self.out, color=False, show_reasoning=False)
+        debug = (
+            None
+            if self.debug == "off"
+            else DebugRenderer(inner, self.err, self.err_color, verbose=self.debug == "verbose")
+        )
         try:
             async for event in self.agent.run(self.session, prompt):
-                if isinstance(event, TextDelta):
+                if isinstance(event, MessageDone):
+                    # 统计在 ApiResponse 行里已经打过了
+                    if debug is None:
+                        self._write(f"\n{format_usage(event, model)}\n")
+                elif isinstance(event, MaxStepsReached):
+                    self._write(f"\n[达到 max_steps={event.max_steps}，本轮停止]\n")
+                elif debug is not None:
+                    debug.on_event(event)
+                elif isinstance(event, TextDelta):
                     self._write(event.text)
                 elif isinstance(event, ToolCallStart):
                     self._write(f"\n→ {event.name} {_clip(event.arguments)}\n")
@@ -121,10 +143,6 @@ class Headless:
                         self._write(f"  {_clip(line)}\n")
                     if len(lines) > TOOL_PREVIEW_LINES:
                         self._write(f"  …（共 {len(lines)} 行）\n")
-                elif isinstance(event, MessageDone):
-                    self._write(f"\n{format_usage(event, model)}\n")
-                elif isinstance(event, MaxStepsReached):
-                    self._write(f"\n[达到 max_steps={event.max_steps}，本轮停止]\n")
         except openai.APIError as e:
             self._write(f"\n请求失败：{type(e).__name__}：{e}\n")
             return 1

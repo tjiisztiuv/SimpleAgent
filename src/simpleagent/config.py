@@ -133,6 +133,20 @@ class ToolOutputConfig(BaseModel):
 TOOL_OUTPUT_DIRNAME = "tool_outputs"
 
 
+class DebugConfig(BaseModel):
+    """交互时的 debug 输出：显示 API 调用和工具调用的详细过程。
+
+    输出走 stderr，和正文分开，可以 `2>debug.log` 单独存一份。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # on 档再加：每轮的消息清单（role + 字符数）、请求体里的非默认开关。
+    # 只打结构不打正文，正文去 traces/ 看。
+    verbose: bool = False
+
+
 class PanelConfig(BaseModel):
     """控制面板。"""
 
@@ -153,6 +167,7 @@ class Config(BaseModel):
     max_steps: int = Field(20, ge=1)
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
+    debug: DebugConfig = Field(default_factory=DebugConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
 
     @model_validator(mode="after")

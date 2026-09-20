@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +66,9 @@ class ToolRegistry:
         # 按注册顺序输出：工具列表在会话内保持不变，请求前缀才能命中缓存
         return [item.schema() for item in self._tools.values()]
 
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
     def is_readonly(self, name: str) -> bool:
         """未知工具当只读处理：它只会得到一条错误结果，不会有副作用。"""
         tool = self._tools.get(name)
@@ -94,9 +98,17 @@ class ToolRegistry:
         function = tool_call.get("function") or {}
         name = function.get("name") or ""
         raw_arguments = function.get("arguments") or ""
+        start = time.monotonic()
 
-        def error(message: str) -> ToolResult:
-            return ToolResult(call_id, name, f"错误：{message}", is_error=True)
+        def error(message: str, decision: str | None = None) -> ToolResult:
+            return ToolResult(
+                call_id,
+                name,
+                f"错误：{message}",
+                is_error=True,
+                duration_ms=(time.monotonic() - start) * 1000,
+                decision=decision,
+            )
 
         tool = self._tools.get(name)
         if tool is None:
@@ -111,15 +123,17 @@ class ToolRegistry:
         except ValidationError as e:
             return error(f"参数校验失败：{format_validation_error(e)}")
         judgment = self.judge(tool, args, ctx)
+        # 参数校验通过之后才有判定结果：上面几条失败路径的 decision 是 None
+        decision = judgment.decision.value
         if judgment.decision is Decision.DENY:
-            return ToolResult(call_id, name, judgment.reason, is_error=True)
+            return error(judgment.reason, decision)
         if judgment.decision is Decision.ASK:
             reason = judgment.reason or f"工具 {name} 会改动文件或执行命令"
             if self.approver is None:
                 # 无人值守：需要问但没有可以问的人，一律按拒绝处理。
                 # 宁可让模型自己想办法，也不要假装被批准。
-                return error(f"{reason}；当前处于无人值守模式，未被授权，默认拒绝")
-            decision = await self.approver.request(
+                return error(f"{reason}；当前处于无人值守模式，未被授权，默认拒绝", decision)
+            answer = await self.approver.request(
                 ApprovalRequest(
                     session_id=ctx.session_id or "",
                     tool_name=name,
@@ -127,17 +141,27 @@ class ToolRegistry:
                     reason=reason,
                 )
             )
-            if not decision.allow:
-                return error(f"{reason}；已被拒绝")
+            if not answer.allow:
+                return error(f"{reason}；已被拒绝", decision)
         try:
             content = await tool.fn(args, ctx)
         except ToolError as e:
-            return error(str(e))
+            return error(str(e), decision)
         except Exception as e:  # 工具自身的 bug 也回给模型，不让整个 loop 崩掉
-            return error(f"工具执行异常 {type(e).__name__}: {e}")
+            return error(f"工具执行异常 {type(e).__name__}: {e}", decision)
+        truncated = False
         if tool.truncate_output:
+            before = len(content)
             content = self.trim(content, name, ctx)
-        return ToolResult(call_id, name, content)
+            truncated = len(content) != before
+        return ToolResult(
+            call_id,
+            name,
+            content,
+            duration_ms=(time.monotonic() - start) * 1000,
+            decision=decision,
+            truncated=truncated,
+        )
 
     async def execute_many(
         self, tool_calls: list[dict[str, Any]], ctx: ToolContext

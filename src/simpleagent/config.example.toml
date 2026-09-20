@@ -19,6 +19,10 @@ max_chars = 30000   # 工具结果回给模型的字符上限，超出只留开�
 max_lines = 500     # 行数上限（两个上限都要满足）；完整内容存 ~/.simpleagent/tool_outputs/，保留 7 天
 # read_file 自己分页（约 3 万字符或 limit 行），不受这里限制
 
+# [debug]
+# enabled = false   # 交互时显示 API 调用和工具调用的过程（也可 sa --debug、REPL 里 /debug on）
+# verbose = true    # 再加每轮的消息清单（role + 字符数）和请求开关；过程输出走 stderr
+
 # [panel]
 # archive_after_minutes = 30   # 控制面板的消息点开后多久移进归档；没点开的不会自动归档
 
