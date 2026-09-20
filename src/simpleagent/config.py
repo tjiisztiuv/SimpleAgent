@@ -142,9 +142,13 @@ class DebugConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    # on 档再加：每轮的消息清单（role + 字符数）、请求体里的非默认开关。
-    # 只打结构不打正文，正文去 traces/ 看。
+    # on 档再加：每轮的消息清单（role + 字符数）、请求体里的非默认开关。只打结构不打正文。
     verbose: bool = False
+    # verbose 档再加：实际发给模型的消息正文（第 2 轮起只打新增的）和模型返回的结构。
+    # 会把系统提示、历史消息、工具结果打到 stderr，日志别随手外传。隐含 verbose。
+    full: bool = False
+    # full 档里每段正文的字符上限，0 = 不截断
+    body_chars: int = Field(600, ge=0)
 
 
 class PanelConfig(BaseModel):

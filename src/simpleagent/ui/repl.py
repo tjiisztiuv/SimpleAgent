@@ -42,6 +42,7 @@ from simpleagent.ui.approve import ConsoleApprover
 from simpleagent.ui.debug import (
     DEBUG_LEVELS,
     DebugRenderer,
+    DebugState,
     debug_level,
     supports_color,
 )
@@ -56,7 +57,7 @@ DIM, RED, BOLD, RESET = "\033[2m", "\033[31m", "\033[1m", "\033[0m"
 HELP = '''命令：
   /model [name]   查看或切换模型 profile（对话历史保留）
   /tools          列出当前可用的工具
-  /debug [LEVEL]  查看或切换 debug：off / on / verbose（过程输出走 stderr）
+  /debug [LEVEL]  查看或切换 debug：off / on / verbose / full（过程输出走 stderr）
   /clear          清空对话历史
   /usage          本会话的 token 用量
   /help           显示帮助
@@ -176,7 +177,7 @@ class Repl:
         approver: Approver | None = None,
         policy: Policy | None = None,
         err: TextIO | None = None,
-        debug: str | None = None,  # off / on / verbose；不给就听配置的
+        debug: str | None = None,  # off / on / verbose / full；不给就听配置的
     ):
         self.config = config
         self.out = out or sys.stdout
@@ -184,6 +185,8 @@ class Repl:
         self.color = supports_color(self.out)
         self.err_color = supports_color(self.err)
         self.debug = debug or debug_level(config)
+        # full 档跨轮只打新增的消息：历史是往后追加的，前面那些上一轮已经打过了
+        self.debug_state = DebugState()
         self.input_fn = input_fn
         self.store = store
         self.session = session or Session(new_session_id())
@@ -292,14 +295,24 @@ class Repl:
         debug = (
             None
             if self.debug == "off"
-            else DebugRenderer(renderer, self.err, self.err_color, verbose=self.debug == "verbose")
+            else DebugRenderer(
+                renderer,
+                self.err,
+                self.err_color,
+                level=self.debug,
+                body_chars=self.config.debug.body_chars,
+                state=self.debug_state,
+            )
         )
         try:
             async for event in self.agent.run(self.session, text):
                 if isinstance(event, MessageDone):
-                    renderer.end()
-                    # 统计在 ApiResponse 行里已经打过了，debug 模式下不重复
-                    if debug is None:
+                    # 统计在 ApiResponse 行里已经打过了，debug 模式下不重复；
+                    # full 档还要靠这个事件打模型返回的结构
+                    if debug is not None:
+                        debug.on_event(event)
+                    else:
+                        renderer.end()
                         self.print(format_stats(event, self.agent.llm.profile.model), DIM)
                 elif isinstance(event, MaxStepsReached):
                     self.print(
@@ -357,6 +370,7 @@ class Repl:
             self.print(f"用法：/debug [{' | '.join(DEBUG_LEVELS)}]", RED)
             return
         self.debug = level
+        self.debug_state = DebugState()  # 换档后重新打一遍完整上下文
         self.print(
             f"debug：{level}" + ("" if level == "off" else "，过程输出走 stderr"),
             DIM,

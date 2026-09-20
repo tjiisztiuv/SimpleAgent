@@ -24,6 +24,7 @@ from simpleagent.config import Config, Profile
 from simpleagent.events import (
     ApiRequest,
     ApiResponse,
+    MessageDone,
     ToolCallStart,
     ToolResult,
     Usage,
@@ -207,10 +208,13 @@ async def test_unknown_tool_has_no_decision(tmp_path: Path):
 # ------------------------------------------------------------ 3. 渲染
 
 
-def make_debug(verbose: bool = False) -> tuple[DebugRenderer, io.StringIO, io.StringIO]:
+def make_debug(
+    level: str = "on", body_chars: int = 600
+) -> tuple[DebugRenderer, io.StringIO, io.StringIO]:
     out, err = io.StringIO(), io.StringIO()
     inner = Renderer(out, color=False, show_reasoning=False)
-    return DebugRenderer(inner, err, color=False, verbose=verbose), out, err
+    renderer = DebugRenderer(inner, err, color=False, level=level, body_chars=body_chars)
+    return renderer, out, err
 
 
 def test_debug_renderer_writes_process_to_stderr():
@@ -254,7 +258,7 @@ def test_debug_renderer_writes_process_to_stderr():
 
 
 def test_verbose_adds_outline_without_content():
-    debug, _, err = make_debug(verbose=True)
+    debug, _, err = make_debug("verbose")
     debug.on_event(
         ApiRequest(
             2,
@@ -302,12 +306,214 @@ def test_api_request_never_carries_credentials(monkeypatch: pytest.MonkeyPatch):
         len(json.dumps(request)),
         message_outline(request["messages"]),
         client.request_options(),
+        request,
     )
     blob = json.dumps(
-        {"url": event.url, "outline": event.outline, "options": event.options}, ensure_ascii=False
+        {
+            "url": event.url,
+            "outline": event.outline,
+            "options": event.options,
+            "payload": event.payload,
+        },
+        ensure_ascii=False,
     )
     assert "sk-should-not-leak" not in blob
     assert event.url == "https://api.deepseek.com/v1/chat/completions"
+    # payload 是实际请求体：有 messages，没有 header / key
+    assert event.payload is not None
+    assert event.payload["messages"][0]["content"] == "hi"
+    assert "api_key" not in event.payload and "headers" not in event.payload
+
+
+# ---- full 档：实际发给模型的输入和模型返回的结构
+
+GLOB_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "glob",
+        "description": "按模式找文件",
+        "parameters": {
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+        },
+    },
+}
+
+
+def api_request_with(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, step: int = 1
+) -> ApiRequest:
+    return ApiRequest(
+        step,
+        "http://a.invalid/v1/chat/completions",
+        "m",
+        len(messages),
+        len(tools or []),
+        100,
+        message_outline(messages),
+        {},
+        {"model": "m", "messages": messages, "tools": tools or []},
+    )
+
+
+def test_full_prints_request_body_and_tools():
+    debug, _, err = make_debug("full")
+    messages = [
+        {"role": "system", "content": "你是 SimpleAgent"},
+        {"role": "user", "content": "看看有多少 py 文件"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c0",
+                    "type": "function",
+                    "function": {"name": "glob", "arguments": '{"pattern": "**/*.py"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c0", "content": "a.py\nb.py"},
+    ]
+    debug.on_event(api_request_with(messages, [GLOB_TOOL]))
+
+    text = err.getvalue()
+    assert "请求体  4 条消息" in text
+    assert "[1] system" in text and "你是 SimpleAgent" in text
+    assert "[2] user" in text and "看看有多少 py 文件" in text
+    assert "[3] assistant" in text and "tool_calls=1" in text
+    assert '⚙ glob #c0  {"pattern": "**/*.py"}' in text
+    assert "[4] tool #c0" in text and "a.py" in text
+    # 工具只打名字和参数字段名，不打完整 schema
+    assert "tools  glob(pattern,path)" in text
+    assert "按模式找文件" not in text
+    # full 档每条消息自带字符数，verbose 的摘要行就不重复了
+    assert "msgs  system" not in text
+
+
+def test_full_prints_only_new_messages_next_step():
+    debug, _, err = make_debug("full")
+    first = [
+        {"role": "system", "content": "系统提示原文"},
+        {"role": "user", "content": "问题"},
+    ]
+    debug.on_event(api_request_with(first))
+    assert "系统提示原文" in err.getvalue()
+
+    err.truncate(0), err.seek(0)
+    second = [
+        *first,
+        {"role": "assistant", "content": "回答"},
+        {"role": "tool", "tool_call_id": "c0", "content": "工具结果"},
+    ]
+    debug.on_event(api_request_with(second, step=2))
+    text = err.getvalue()
+    assert "（前 2 条同上次）" in text
+    assert "系统提示原文" not in text
+    assert "[4] tool #c0" in text and "工具结果" in text
+
+    # /clear 之后条数变少：重新打一遍完整上下文
+    err.truncate(0), err.seek(0)
+    debug.on_event(api_request_with([{"role": "system", "content": "系统提示原文"}], step=3))
+    assert "系统提示原文" in err.getvalue()
+
+
+def test_full_lists_tools_once_until_they_change():
+    debug, _, err = make_debug("full")
+    messages = [{"role": "user", "content": "问题"}]
+    debug.on_event(api_request_with(messages, [GLOB_TOOL]))
+    assert "glob(pattern,path)" in err.getvalue()
+
+    err.truncate(0), err.seek(0)
+    debug.on_event(api_request_with(messages, [GLOB_TOOL], step=2))
+    assert "tools  1 个（同上次）" in err.getvalue()
+
+    # 工具变了就重新列一遍：换模型 / 改工具集时最想看到这行
+    err.truncate(0), err.seek(0)
+    bash = {"type": "function", "function": {"name": "bash", "parameters": {"properties": {}}}}
+    debug.on_event(api_request_with(messages, [GLOB_TOOL, bash], step=3))
+    text = err.getvalue()
+    assert "glob(pattern,path) · bash" in text and "共 2 个" in text
+
+
+def test_full_truncates_long_content():
+    debug, _, err = make_debug("full", body_chars=50)
+    debug.on_event(api_request_with([{"role": "user", "content": "长" * 500}]))
+    text = err.getvalue()
+    assert "500 字" in text  # 抬头仍报完整长度
+    assert "…（共 500 字）" in text
+    assert text.count("长") == 50  # body_chars 是唯一的闸门
+
+
+def test_full_body_chars_zero_keeps_everything():
+    debug, _, err = make_debug("full", body_chars=0)
+    debug.on_event(api_request_with([{"role": "user", "content": "长" * 500}]))
+    assert err.getvalue().count("长") == 500
+
+
+def test_full_prints_response_structure():
+    debug, _, err = make_debug("full")
+    debug.on_event(
+        MessageDone(
+            message={
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "先看看目录",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "glob", "arguments": '{"pattern": "src/**/*.py"}'},
+                    }
+                ],
+            },
+            finish_reason="tool_calls",
+            usage=Usage(
+                prompt_tokens=100, completion_tokens=20, cached_tokens=64, reasoning_tokens=8
+            ),
+        )
+    )
+    text = err.getvalue()
+    assert "响应  assistant · finish_reason=tool_calls" in text
+    assert "思考  5 字" in text and "先看看目录" in text
+    assert "正文  （content=null）" in text
+    assert "工具调用 1" in text and '⚙ glob #c1  {"pattern": "src/**/*.py"}' in text
+    assert "usage  in 100(缓存 64) · out 20(思考 8)" in text
+
+
+def test_full_flags_invalid_tool_arguments():
+    debug, _, err = make_debug("full")
+    debug.on_event(
+        MessageDone(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {"name": "grep", "arguments": '{"pattern": '},
+                    }
+                ],
+            },
+            finish_reason="tool_calls",
+        )
+    )
+    text = err.getvalue()
+    assert "⚠ 参数不是合法 JSON" in text
+    assert '{"pattern":' in text  # 原样打出来，才看得出模型吐了半截
+
+
+@pytest.mark.parametrize("level", ["on", "verbose"])
+def test_lower_levels_never_print_body(level: str):
+    debug, _, err = make_debug(level)
+    debug.on_event(api_request_with([{"role": "system", "content": "机密的系统提示"}], [GLOB_TOOL]))
+    debug.on_event(
+        MessageDone(message={"role": "assistant", "content": "模型的回答"}, finish_reason="stop")
+    )
+    text = err.getvalue()
+    assert "机密的系统提示" not in text
+    assert "模型的回答" not in text
+    assert "请求体" not in text and "响应  assistant" not in text
 
 
 # ------------------------------------------------------------ 4. 开关
@@ -324,8 +530,9 @@ def test_debug_level_from_config():
         debug_level(Config.model_validate({**base, "debug": {"enabled": True, "verbose": True}}))
         == "verbose"
     )
-    # verbose 单独打开不算数
-    assert debug_level(Config.model_validate({**base, "debug": {"verbose": True}})) == "off"
+    assert debug_level(Config.model_validate({**base, "debug": {"full": True}})) == "full"
+    # full 隐含 verbose，verbose 隐含 enabled：只写一个也算数
+    assert debug_level(Config.model_validate({**base, "debug": {"verbose": True}})) == "verbose"
 
 
 async def test_repl_debug_switch_and_stderr_output(config: Config, tmp_path: Path):
@@ -354,6 +561,36 @@ async def test_repl_debug_switch_and_stderr_output(config: Config, tmp_path: Pat
     assert "debug：verbose" in out.getvalue()
     await repl.handle("/debug nonsense")
     assert "用法：/debug" in out.getvalue()
+
+
+async def test_repl_full_debug_prints_context_incrementally(config: Config, tmp_path: Path):
+    out, err = io.StringIO(), io.StringIO()
+    fake = FakeLLM(["你好", "再见"], name="a", profile=config.profiles["a"])
+
+    def factory(name: str, profile: Profile) -> FakeLLM:
+        return fake
+
+    repl = Repl(
+        config,
+        llm_factory=factory,
+        out=out,
+        err=err,
+        input_fn=lambda _: "/exit",
+        debug="full",
+    )
+    await repl.handle("第一句")
+    text = err.getvalue()
+    assert "请求体  2 条消息" in text  # system + user
+    assert "第一句" in text
+
+    err.truncate(0), err.seek(0)
+    await repl.handle("第二句")
+    text = err.getvalue()
+    assert "（前 2 条同上次）" in text
+    assert "第一句" not in text
+    assert "[4] user" in text and "第二句" in text
+    # 响应结构也打出来了
+    assert "响应  assistant" in text and "正文  2 字" in text
 
 
 async def test_headless_debug_goes_to_stderr(config: Config, tmp_path: Path):

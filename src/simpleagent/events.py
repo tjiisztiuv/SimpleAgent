@@ -51,10 +51,10 @@ class Usage:
 
 @dataclass
 class ApiRequest:
-    """一次 LLM 请求发出前。只带摘要：不含 header、不含 key、不含请求体正文。
+    """一次 LLM 请求发出前：摘要 + 实际请求体。不含 header、不含 key。
 
     messages / tools / payload_bytes 用来观察「这次到底发了多少东西」，
-    排查上下文膨胀和工具列表变化时最直观。
+    排查上下文膨胀和工具列表变化时最直观；正文在 payload 里，只有 full 档会打出来。
     """
 
     step: int  # 本轮对话的第几次请求，从 1 开始
@@ -67,6 +67,9 @@ class ApiRequest:
     outline: list[dict[str, Any]] = field(default_factory=list)
     # 非默认的协议开关；extra_body 只放键名，值可能是厂商私有参数
     options: dict[str, Any] = field(default_factory=dict)
+    # 实际发出的请求体（含 messages / tools，不含 header、不含 key），full 档用来打正文。
+    # 挂的是引用，不拷贝也不额外序列化：off 档零成本，中途 /debug full 也立刻有东西看。
+    payload: dict[str, Any] | None = None
 
 
 @dataclass

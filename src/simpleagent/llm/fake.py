@@ -91,6 +91,8 @@ class FakeLLM:
             len(tools or []),
             len(json.dumps(messages, ensure_ascii=False).encode("utf-8")),
             message_outline(messages),
+            {},
+            {"model": self.profile.model, "messages": messages, "tools": tools or []},
         )
         if not self.responses:
             raise AssertionError("FakeLLM 的脚本已经用完")

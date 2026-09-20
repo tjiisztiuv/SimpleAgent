@@ -244,6 +244,6 @@ src/simpleagent/
   ui/repl.py              ✅ 交互式 REPL（写操作终端确认）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
   ui/approve.py           ✅ ConsoleApprover：终端 y / a / 其他键拒绝
-  ui/debug.py             ✅ debug 输出：API 调用与工具调用的过程，走 stderr（off / on / verbose）
+  ui/debug.py             ✅ debug 输出：API 调用与工具调用的过程，走 stderr（off / on / verbose / full）
 tests/                    ✅ 各模块对应测试
 ```
