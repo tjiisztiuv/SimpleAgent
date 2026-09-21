@@ -5,6 +5,7 @@ description = "自用、可学习的本地 agent：从零手写 agent loop，接
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "croniter>=6.2",
     "openai>=3.14.1",
     "pydantic>=2.13.5",
 ]

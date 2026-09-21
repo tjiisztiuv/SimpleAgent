@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-21 M4 第 1 步：定时任务定义与时间表（schedules.toml + `sa schedule list`）](2026-09-21-m4-schedules-definition.md)
 - [2026-09-20 debug 模式加第四档 full：看清发给 LLM 的具体输入和模型返回了什么](2026-09-20-debug-mode-full-level.md)
 - [2026-09-20 新增 debug 模式：交互时看清 API 调用与工具调用的过程（三档开关，输出走 stderr）](2026-09-20-debug-mode.md)
 - [2026-09-19 空间会话里模型回复改为 Markdown 渲染（标题/列表/表格/引用/链接，零依赖手写，图片不加载）](2026-09-19-space-session-markdown-render.md)

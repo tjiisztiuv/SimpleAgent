@@ -1,0 +1,28 @@
+# SimpleAgent 定时任务
+# 位置：~/.simpleagent/schedules.toml（可用环境变量 SIMPLEAGENT_HOME 改数据目录）
+# `sa schedule list` 查看所有任务和下次触发时间；写错的任务会标出原因。
+#
+# 每个任务是一个 [jobs.<名字>] 表。名字只用字母、数字、_ 和 -（会用作日志目录名和命令参数），
+# 中文名写进 title。一个任务写错只影响它自己，其余任务照常加载。
+#
+# cron 是 5 段：分 时 日 月 周，按本机时区；也可以写 @hourly / @daily / @weekly / @monthly。
+#   "0 9 * * 1-5"    工作日 9:00
+#   "*/30 * * * *"   每 30 分钟
+#   "30 2 * * *"     每天 2:30
+#
+# 定时任务跑的时候没有人可以确认：需要确认的工具（write_file / edit_file / bash）
+# 只有列进 allowed_tools 才会执行，其余一律拒绝，原因回给模型。
+# 写到工作目录之外、危险命令（rm -rf ~ 之类）任何情况下都拒绝。
+
+# [jobs.downloads-digest]
+# title = "下载目录周报"
+# cron = "0 9 * * 1"              # 每周一 9:00
+# prompt = """
+# 看一下 ~/Downloads 里的文件，按类型分组列个清单，指出看起来可以删掉的安装包和重复文件。
+# """
+# profile = "deepseek"            # 默认用 config.toml 的 default_profile
+# cwd = "~/notes"                 # 工作目录，写文件只能写在这里；默认 ~/.simpleagent/jobs/<名字>/
+# allowed_tools = []              # 允许自动执行的工具，如 ["write_file"]；不写就只能用只读工具
+# timeout = 900                   # 秒，超时就取消这次运行
+# max_steps = 30                  # 覆盖 config.toml 的 max_steps
+# enabled = false                 # 暂停这个任务，不用删掉

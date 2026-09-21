@@ -6,16 +6,19 @@ import argparse
 import asyncio
 import errno
 import sys
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from simpleagent.agent.session import SESSION_DIRNAME, Session, SessionStore
-from simpleagent.config import ConfigError, home_dir, init_config, load_config
+from simpleagent.config import ConfigError, config_path, home_dir, init_config, load_config
 from simpleagent.panel.store import LEVELS
+from simpleagent.scheduler import ScheduleError, init_schedules, load_schedules, schedules_path
 from simpleagent.ui.debug import DEBUG_LEVELS
 
 # --resume 不给值时的哨兵：argparse 用 const 填进来，好区分「没传」和「传了但没给 id」
 LATEST = "__latest__"
+WEEKDAYS = "一二三四五六日"
 
 
 class CliError(Exception):
@@ -72,6 +75,57 @@ def inbox_push(title: str, body: str | None, level: str, source: str) -> int:
     return 0
 
 
+def init_files() -> int:
+    """sa init：缺哪个配置文件就生成哪个；都已存在时报错，和以前一样不覆盖。
+
+    已经有 config.toml 的老用户再跑一次就能拿到 schedules.toml 模板。
+    """
+    targets = [
+        ("配置", config_path(), init_config),
+        ("定时任务模板", schedules_path(), init_schedules),
+    ]
+    if all(path.exists() for _, path, _ in targets):
+        raise CliError(f"配置文件都已存在：{config_path()}、{schedules_path()}")
+    for label, path, create in targets:
+        if path.exists():
+            print(f"{label}已存在，跳过：{path}")
+        else:
+            print(f"已生成{label}：{create()}")
+    return 0
+
+
+def format_fire_time(dt: datetime) -> str:
+    return f"{dt:%m-%d} 周{WEEKDAYS[dt.weekday()]} {dt:%H:%M}"
+
+
+def list_schedules(now: datetime | None = None) -> int:
+    """列出定时任务和下次触发时间。有任务加载失败时退出码为 1，方便改完顺手检查。"""
+    path = schedules_path()
+    if not path.exists():
+        print(f"还没有定时任务：先 `sa init` 生成 {path}，照里面的示例写一个。")
+        return 0
+    schedules = load_schedules(path, profiles=load_config().profiles)
+    if not schedules.jobs and not schedules.errors:
+        print(f"{path} 里还没有任务。")
+        return 0
+    now = now or datetime.now().astimezone()
+    for job in schedules.jobs.values():
+        print(f"{job.name}   {job.title}" if job.title else job.name)
+        if not job.enabled:
+            detail = [job.cron, "已停用"]
+        else:
+            detail = [job.cron, f"下次 {format_fire_time(job.next_fire(now))}"]
+            tools = ", ".join(job.allowed_tools) if job.allowed_tools else "只读工具"
+            detail.append(f"工具 {tools}")
+            if job.profile:
+                detail.append(job.profile)
+        print(f"    {' · '.join(detail)}")
+    for name, reason in schedules.errors.items():
+        print(name)
+        print(f"    ✗ {reason}")
+    return 1 if schedules.errors else 0
+
+
 def list_sessions(store: SessionStore, limit: int) -> int:
     rows = store.list(limit=limit)
     if not rows:
@@ -112,7 +166,9 @@ def main(argv: list[str] | None = None) -> int:
         help="从已保存的会话继续；不给 id 就接着最近那次",
     )
     commands = parser.add_subparsers(dest="command", metavar="<command>")
-    commands.add_parser("init", help="生成默认配置文件 ~/.simpleagent/config.toml")
+    commands.add_parser(
+        "init", help="生成默认配置 ~/.simpleagent/config.toml 和定时任务模板 schedules.toml"
+    )
     serve = commands.add_parser("serve", help="启动本地 API（HTTP + SSE），供桌面客户端连接")
     serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     serve.add_argument("--port", type=int, default=8384, help="监听端口（默认 8384）")
@@ -144,6 +200,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LEVEL",
         help=argparse.SUPPRESS,
     )
+    schedule = commands.add_parser("schedule", help="定时任务（~/.simpleagent/schedules.toml）")
+    schedule_commands = schedule.add_subparsers(
+        dest="schedule_command", metavar="<action>", required=True
+    )
+    schedule_commands.add_parser("list", help="列出任务和下次触发时间，写错的任务会标出原因")
     sessions = commands.add_parser("sessions", help="列出已保存的会话")
     sessions.add_argument("--limit", type=int, default=20, help="最多显示几条，默认 20")
     inbox = commands.add_parser("inbox", help="控制面板的消息：脚本 / 例行任务往这里投结论")
@@ -164,8 +225,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "init":
-            print(f"已生成配置：{init_config()}")
-            return 0
+            return init_files()
+        if args.command == "schedule":
+            return list_schedules()
         if args.command == "serve":
             from simpleagent.serve.app import make_server
 
@@ -229,4 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except ConfigError as e:
         print(f"配置错误：{e}", file=sys.stderr)
+        return 1
+    except ScheduleError as e:
+        print(f"定时任务配置错误：{e}", file=sys.stderr)
         return 1
