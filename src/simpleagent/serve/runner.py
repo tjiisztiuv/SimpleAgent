@@ -7,6 +7,7 @@
 - 跑 agent.run() / CLI，把事件实时发到事件总线，同时把消息和元信息落盘。
 - 支持取消（内置 loop 取消底层 asyncio 任务；外部 CLI 直接 terminate 进程）。
 - 支持手动触发验证命令，并把结果写成 verification 帧 + 落盘。
+- 持有一个 McpManager：MCP server 在后台事件循环里启动一次，所有空间、所有会话共用。
 
 线程模型：Runner 自己起一个线程跑 asyncio 事件循环；HTTP 层在另一个线程，通过
 run_coroutine_threadsafe / call_soon_threadsafe 与它通信，两者用总线（线程安全）解耦。
@@ -15,6 +16,7 @@ run_coroutine_threadsafe / call_soon_threadsafe 与它通信，两者用总线�
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import signal
 import subprocess
@@ -31,6 +33,7 @@ from simpleagent.agent.session import Session
 from simpleagent.agents import adapter_for
 from simpleagent.config import TOOL_OUTPUT_DIRNAME, Config, home_dir
 from simpleagent.events import Event, MessageDone, ToolResult
+from simpleagent.mcp.manager import McpManager
 from simpleagent.panel.store import PanelStore
 from simpleagent.permissions import Policy
 from simpleagent.serve.approval import APIApprover, ApprovalDecision, PendingApprovals
@@ -102,6 +105,9 @@ class Runner:
         # 外部 CLI 执行者：正在跑的子进程，以及「这次是用户主动取消的」标记
         self._procs: dict[str, Any] = {}
         self._cancelled: set[str] = set()
+        # MCP server 跟着 serve 进程走，不跟着会话走：start() 时启动一次，所有空间共用
+        self.mcp = McpManager(config.mcp_servers)
+        self._mcp_started: concurrent.futures.Future[None] | None = None
 
     # ----------------------------------------------------------------- 生命周期
     def start(self) -> None:
@@ -113,12 +119,33 @@ class Runner:
             target=self._run_loop, daemon=True, name="simpleagent-runner"
         )
         self._thread.start()
+        self._mcp_started = asyncio.run_coroutine_threadsafe(self.mcp.start(), self._loop)
+        self._mcp_started.add_done_callback(_log_future_error)
+        self._mcp_started.add_done_callback(self._report_mcp)
+
+    def _report_mcp(self, fut: Any) -> None:
+        """MCP 启动完打一行状态到 stderr：serve 在后台跑，server 起不来要让人看得到。"""
+        if fut.cancelled() or fut.exception() is not None:
+            return
+        if summary := self.mcp.summary():
+            print(summary, file=sys.stderr)
+            for server in self.mcp.servers:
+                if server.state == "failed" and server.error:
+                    for line in server.error.splitlines():
+                        print(f"  {line}", file=sys.stderr)
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
     def shutdown(self) -> None:
+        if self._loop is not None and self._thread is not None and self._thread.is_alive():
+            # 先关 MCP server 再停循环：子进程和管道绑在这个循环上，循环停了就关不掉了
+            closing = asyncio.run_coroutine_threadsafe(self.mcp.close(), self._loop)
+            try:
+                closing.result(timeout=10)
+            except Exception:  # noqa: BLE001  关不干净也要继续退出
+                pass
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:
@@ -194,6 +221,9 @@ class Runner:
             self.store.append_message(space_id, session_id, {"role": "user", "content": user_input})
             self.store.update_meta(space_id, session_id, status="running")
             if space.executor == "simpleagent":
+                # MCP server 还在启动就等它：工具列表要在第一次请求前定下来
+                if self._mcp_started is not None:
+                    await asyncio.wrap_future(self._mcp_started)
                 self._agents[session_id] = self._build_agent(space, session)
         except Exception as e:  # noqa: BLE001
             # 起不来必须让客户端知道：这一段在原来是在 try 之外，异常会被 asyncio future
@@ -435,7 +465,7 @@ class Runner:
         profile = self.config.profiles[space.profile]
         llm = self.llm_factory(space.profile, profile)
         tools = ToolRegistry(
-            builtin_tools(),
+            [*builtin_tools(), *self.mcp.tools()],
             max_output_chars=self.config.tool_output.max_chars,
             max_output_lines=self.config.tool_output.max_lines,
         )
@@ -446,6 +476,7 @@ class Runner:
         tools.policy = Policy(cwd)
         output_dir = home_dir() / TOOL_OUTPUT_DIRNAME
         system_prompt = build_system_prompt(self.config.system_prompt, cwd=cwd)
+        system_prompt += self.mcp.prompt_section()
         return Agent(
             llm=llm,
             tools=tools,

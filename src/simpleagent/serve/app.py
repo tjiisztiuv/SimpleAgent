@@ -711,9 +711,20 @@ def _make_handler(app: Server):
     return Handler
 
 
+class ApiServer(ThreadingHTTPServer):
+    """HTTP server 关闭时顺带关掉 Runner：它的后台循环里跑着 MCP server 子进程。"""
+
+    app: Server | None = None
+
+    def server_close(self) -> None:
+        super().server_close()
+        if self.app is not None:
+            self.app.runner.shutdown()
+
+
 def make_server(
     config: Config, host: str = "127.0.0.1", port: int = 8384, llm_factory=None
-) -> ThreadingHTTPServer:
+) -> ApiServer:
     """构造并启动本地 API 服务，返回已 start() 的 http server（调用方负责 serve_forever）。
 
     先抢端口再 app.start()：端口被占用时直接抛 OSError，不会留下一个已经跑起来的
@@ -721,6 +732,7 @@ def make_server(
     """
     app = Server(config, llm_factory=llm_factory)
     handler = _make_handler(app)
-    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd = ApiServer((host, port), handler)
+    httpd.app = app
     app.start()
     return httpd

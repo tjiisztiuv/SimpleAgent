@@ -1,8 +1,10 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
+from simpleagent.permissions import ApprovalDecision, ApprovalRequest, Policy
 from simpleagent.tools import ToolContext, ToolError, ToolRegistry, tool
 from simpleagent.tools.base import clean_schema
 
@@ -126,3 +128,37 @@ async def test_execute_failures_become_error_results(
     assert result.call_id == "c1"
     assert result.content.startswith("错误：")
     assert expected in result.content
+
+
+# ------------------------------------------------ parameters / confirm_reason（M5）
+
+
+class RecordingApprover:
+    def __init__(self, allow: bool) -> None:
+        self.allow = allow
+        self.requests: list[ApprovalRequest] = []
+
+    async def request(self, req: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(req)
+        return ApprovalDecision(allow=self.allow)
+
+
+def test_parameters_are_used_verbatim():
+    raw = {"type": "object", "properties": {"x": {"type": "string", "title": "X"}}}
+    item = replace(echo, name="raw", parameters=raw)
+    assert item.schema()["function"]["parameters"] is raw  # 不再从 args_model 生成、也不去 title
+
+
+@pytest.mark.parametrize(
+    ("confirm_reason", "expected"),
+    [(None, "工具 ask_echo 会改动文件或执行命令"), ("来自 MCP server x", "来自 MCP server x")],
+)
+async def test_confirm_reason_goes_to_approver_and_model(
+    ctx: ToolContext, confirm_reason: str | None, expected: str
+):
+    item = replace(echo, name="ask_echo", permission="ask", confirm_reason=confirm_reason)
+    approver = RecordingApprover(allow=False)
+    registry = ToolRegistry([item], approver=approver, policy=Policy(ctx.cwd))
+    result = await registry.execute(call("ask_echo", '{"text": "hi"}'), ctx)
+    assert approver.requests[0].reason == expected
+    assert result.content == f"错误：{expected}；已被拒绝"

@@ -21,6 +21,8 @@ agent loop、工具调用、权限、上下文都从零手写，只依赖 OpenAI
 - **调度外部 agent**：空间的执行者可以选 Claude Code 或 OpenCode，它们以无头模式跑，
   输出被翻译成同一套事件，界面上和内置 loop 长得一样。
 - **给 sa 发消息**：脚本和定时任务可以用 `sa inbox push` 把结论投进控制面板。
+- **接 MCP server**：在配置里写上 `[mcp_servers.<名字>]`，它的工具就以 `mcp__<名字>__<工具>`
+  出现在模型面前，终端、`sa run`、工作台都能用；新旧两代 MCP 协议都支持。
 
 ## 安装
 
@@ -66,7 +68,8 @@ sa --resume se_x1y2      # 接着指定会话
 sa sessions              # 列出已保存的会话
 ```
 
-REPL 里的命令：`/model [name]` 切模型、`/tools` 列工具、`/usage` 看用量、`/clear` 清空历史、`/help`、`/exit`。
+REPL 里的命令：`/model [name]` 切模型、`/tools` 列工具、`/mcp` 看 MCP server 状态、`/usage` 看用量、
+`/clear` 清空历史、`/help`、`/exit`。
 要输入多行，单独一行敲 `"""` 开始，再敲一次 `"""` 结束；Ctrl+C 中断当前回复，Ctrl+D 退出。
 
 模型自己决定调哪个工具，终端里用灰色显示调用和结果预览。一轮对话最多请求模型 `max_steps` 次（默认 20），
@@ -127,6 +130,32 @@ uv run pytest 2>&1 | sa inbox push -t "夜间测试" --level warn --source sched
 API key 只从环境变量或 `~/.simpleagent/.env` 读，不写进配置文件，也不会出现在 trace 里；
 `bash` 工具启动子进程时会把这些 key 从环境变量里摘掉，免得模型 `env` 一下就看到了。
 
+## MCP server
+
+在 `~/.simpleagent/config.toml` 里加一段，比如让模型能读写 `~/notes`：
+
+```toml
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
+```
+
+```bash
+sa mcp list              # 把每个 server 启动一遍，列出状态和工具（不需要 API key）
+```
+
+- **启动**：`sa` / `sa run` / `sa serve` 启动时把所有 server 一起拉起来，等它们都有结果再开始；
+  某个 server 起不来只影响它自己。REPL 里按 Ctrl+C 可以跳过卡住的 server，`/mcp` 看详情。
+- **权限**：server 标了只读（`readOnlyHint`）的工具免确认，其余要确认，`sa run` 里要用
+  `--allow mcp__filesystem__write_file` 这样逐个放行。**工作目录边界管不到 MCP 工具**，
+  server 能碰什么由它自己的参数决定——上面给的 `~/notes` 就是它能读写的全部范围。
+- **密钥**：server 默认只拿到 `HOME`、`PATH`、`LANG`、代理这些环境变量。需要 token 的写成
+  `env_vars = ["GITHUB_TOKEN"]`，值放环境变量或 `~/.simpleagent/.env`，不要写进配置文件。
+- **崩溃**：server 中途退出的话，下次调用时自动重启（5 分钟内最多 3 次）；退出时正在执行的那次调用
+  不会自动重试，由模型决定要不要重来。
+
+其余选项（只暴露部分工具、按工具覆盖权限、超时、协议代际）见 `sa init` 生成的配置模板末尾。
+
 ## 配置和数据
 
 配置在 `~/.simpleagent/config.toml`（`sa init` 生成，里面每项都有注释）：
@@ -141,6 +170,7 @@ API key 只从环境变量或 `~/.simpleagent/.env` 读，不写进配置文件�
 | `[tool_output]` | 工具结果回给模型的字符和行数上限 |
 | `[panel]` | 控制面板的消息多久自动归档 |
 | `[profiles.*]` | 各家模型：`base_url`、`api_key_env`、`model`、`context_window`，以及各家私有参数 |
+| `[mcp_servers.*]` | MCP server：`command`、`args`、`env_vars`，以及工具过滤、权限覆盖、超时 |
 
 数据都在 `~/.simpleagent/` 下（可以用环境变量 `SIMPLEAGENT_HOME` 换个位置）：
 

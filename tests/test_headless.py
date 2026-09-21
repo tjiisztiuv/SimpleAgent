@@ -167,3 +167,53 @@ def test_resume_missing_session_raises_cli_error(config: Config, sa_home: Path):
 
     with pytest.raises(CliError):
         resolve_resume(session_store(), "__latest__")
+
+
+# ------------------------------------------------------------ MCP（M5）
+@pytest.mark.parametrize(
+    ("allowed", "expected"),
+    [
+        ((), "来自 MCP server fake，server 没有标注它是只读的；已被拒绝"),
+        (("mcp__fake__image",), "[图片 image/png，约 2.0 KB，未展示给模型]"),
+    ],
+)
+async def test_headless_mcp_tools_follow_whitelist(
+    config: Config, fake_mcp, tmp_path: Path, allowed: tuple[str, ...], expected: str
+):
+    """需要确认的 MCP 工具和内置写工具一样：不在 --allow 里就拒绝，在就执行。"""
+    config = config.model_copy(update={"mcp_servers": {"fake": fake_mcp()}})
+    call = {"id": "c1", "name": "mcp__fake__image", "arguments": {}}
+    out, err = io.StringIO(), io.StringIO()
+    frontend = Headless(
+        config,
+        cwd=tmp_path,
+        allowed_tools=allowed,
+        llm_factory=lambda name, profile: FakeLLM([{"tool_calls": [call]}, "好"], name=name),
+        out=out,
+        err=err,
+    )
+    assert await frontend.run("看图") == 0
+    tool_message = next(m for m in frontend.session.messages if m["role"] == "tool")
+    assert expected in tool_message["content"]
+    # 状态走 stderr，正文里没有
+    assert "MCP：fake ✓ 9 个工具" in err.getvalue()
+    assert "MCP：" not in out.getvalue()
+    assert frontend.mcp.servers[0].state == "closed"
+
+
+async def test_headless_failed_mcp_server_only_warns(config: Config, tmp_path: Path):
+    from simpleagent.config import McpServerConfig
+
+    ghost = McpServerConfig(command="definitely-not-a-command-sa-test")
+    config = config.model_copy(update={"mcp_servers": {"ghost": ghost}})
+    err = io.StringIO()
+    frontend = Headless(
+        config,
+        cwd=tmp_path,
+        llm_factory=lambda name, profile: FakeLLM(["没有 MCP 也能做完"], name=name),
+        out=io.StringIO(),
+        err=err,
+    )
+    assert await frontend.run("做事") == 0
+    assert "MCP：ghost ✗ 找不到命令" in err.getvalue()
+    assert "  连接 MCP server ghost 失败：找不到命令" in err.getvalue()
