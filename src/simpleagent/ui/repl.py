@@ -35,6 +35,7 @@ from simpleagent.events import (
     ToolResult,
 )
 from simpleagent.llm.client import LLM, LLMClient
+from simpleagent.mcp.manager import McpManager
 from simpleagent.permissions import Approver, Policy
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
@@ -57,6 +58,7 @@ DIM, RED, BOLD, RESET = "\033[2m", "\033[31m", "\033[1m", "\033[0m"
 HELP = '''命令：
   /model [name]   查看或切换模型 profile（对话历史保留）
   /tools          列出当前可用的工具
+  /mcp            查看 MCP server 的状态（连上没有、几个工具、重启过几次）
   /debug [LEVEL]  查看或切换 debug：off / on / verbose / full（过程输出走 stderr）
   /clear          清空对话历史
   /usage          本会话的 token 用量
@@ -218,6 +220,8 @@ class Repl:
             output_dir=output_dir,
             hidden_env=config.api_key_env_names(),
         )
+        # MCP server 在 run() 里、同一个事件循环中启动：子进程和管道都绑定在循环上
+        self.mcp = McpManager(config.mcp_servers)
         # 新开的会话挂上存储：之后的每条消息都会写进 sessions/<id>.jsonl。
         # 放在创建模型客户端之后——缺 API key 时上面就抛错了，不能留下一条空会话
         if store is not None and session is None:
@@ -247,9 +251,10 @@ class Repl:
             self.print(f"trace：{self.tracer.dir}", DIM)
         if self.debug != "off":
             self.print(f"debug：{self.debug}，API 与工具调用的过程输出走 stderr", DIM)
-        self.print("输入 /help 查看命令", DIM)
         with asyncio.Runner() as runner:
             try:
+                self._start_mcp(runner)
+                self.print("输入 /help 查看命令", DIM)
                 while True:
                     try:
                         line = self._read_input()
@@ -267,8 +272,27 @@ class Repl:
                     except KeyboardInterrupt:
                         self.print("[已中断]", DIM)
             finally:
+                runner.run(self.mcp.close())
                 runner.run(self.agent.llm.close())
         return 0
+
+    def _start_mcp(self, runner: asyncio.Runner) -> None:
+        """启动配置里的 MCP server，把它们的工具注册进来。等全部有结果再接受第一个问题：
+        工具列表在第一次请求前定下来，会话里就不再变，前缀缓存才能命中。"""
+        names = [server.name for server in self.mcp.enabled]
+        if not names:
+            return
+        self.print(f"启动 MCP server：{'、'.join(names)}（按 Ctrl+C 跳过）", DIM)
+        try:
+            runner.run(self.mcp.start())
+        except KeyboardInterrupt:
+            self.print("[已跳过还没启动好的 MCP server]", DIM)
+        for tool in self.mcp.tools():
+            self.agent.tools.register(tool)
+        self.agent.system_prompt += self.mcp.prompt_section()
+        if summary := self.mcp.summary():
+            hint = "（/mcp 看详情）" if self.mcp.failed else ""
+            self.print(summary + hint, RED if self.mcp.failed else DIM)
 
     def _read_input(self) -> str:
         line = self.input_fn("> ")
@@ -356,6 +380,11 @@ class Repl:
                     function = item["function"]
                     self.print(f"  {function['name']}", BOLD)
                     self.print(f"      {function['description']}")
+            case "mcp":
+                if not self.mcp.servers:
+                    self.print("没有配置 MCP server：在 config.toml 里加 [mcp_servers.<名字>]")
+                for line in self.mcp.describe():
+                    self.print(line)
             case "debug":
                 self._set_debug(arg)
             case _:

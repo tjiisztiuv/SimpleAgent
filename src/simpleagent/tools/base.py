@@ -120,15 +120,24 @@ class Tool:
     # 之所以让工具自己声明而不是注册表统一反射：MCP、Skills 注册进来的工具也能各自标注，
     # 加工具时不用回头改 Policy。
     scope: ScopeFn | None = None
+    # 现成的 JSON Schema（MCP 工具自带）。给了就原样交给模型，args_model 只做最宽松的校验；
+    # None 表示从 args_model 生成（内置工具）
+    parameters: dict[str, Any] | None = None
+    # 需要人确认时显示的说明；None 用注册表的默认说法（「会改动文件或执行命令」）。
+    # MCP 工具发邮件、建日程，默认说法就不对了，由它们各自说明
+    confirm_reason: str | None = None
 
     def schema(self) -> dict[str, Any]:
         """请求体 tools 字段里的一项（OpenAI function calling 格式）。"""
+        parameters = self.parameters
+        if parameters is None:
+            parameters = clean_schema(self.args_model.model_json_schema())
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": clean_schema(self.args_model.model_json_schema()),
+                "parameters": parameters,
             },
         }
 

@@ -8,6 +8,7 @@ from simpleagent.config import (
     ConfigError,
     Profile,
     config_path,
+    example_config,
     init_config,
     load_config,
     read_env_file,
@@ -134,3 +135,80 @@ def test_panel_config(sa_home: Path):
     _write(base + "[panel]\narchive_after_minutes = 0\n")
     with pytest.raises(ConfigError, match="archive_after_minutes"):
         load_config()
+
+
+# ------------------------------------------------------------------ MCP server（M5）
+
+BASE = 'default_profile = "a"\n[profiles.a]\nbase_url = "http://a"\nmodel = "m"\n'
+
+
+def test_mcp_server_defaults(sa_home: Path):
+    _write(BASE + '[mcp_servers.fs]\ncommand = "npx"\n')
+    server = load_config().mcp_servers["fs"]
+    assert server.args == [] and server.env == {} and server.env_vars == []
+    assert server.enabled and server.trust_annotations
+    assert server.protocol == "auto"
+    assert (server.startup_timeout, server.tool_timeout) == (60, 60)
+    assert server.enabled_tools is None and server.disabled_tools == []
+
+
+def test_no_mcp_servers_by_default(config: Config):
+    assert config.mcp_servers == {}
+
+
+@pytest.mark.parametrize("name", ["a__b", "a.b", "_a", "a_", "x" * 25, "中文"])
+def test_mcp_server_name_rules(sa_home: Path, name: str):
+    _write(BASE + f'[mcp_servers."{name}"]\ncommand = "npx"\n')
+    with pytest.raises(ConfigError, match="MCP server 名"):
+        load_config()
+
+
+@pytest.mark.parametrize("name", ["fs", "my_server", "gh-2"])
+def test_mcp_server_name_ok(sa_home: Path, name: str):
+    _write(BASE + f'[mcp_servers."{name}"]\ncommand = "npx"\n')
+    assert name in load_config().mcp_servers
+
+
+def test_mcp_env_vars_must_be_names(sa_home: Path):
+    _write(BASE + '[mcp_servers.gh]\ncommand = "npx"\nenv_vars = ["ghp_abc123-secret"]\n')
+    with pytest.raises(ConfigError, match="要填环境变量名") as info:
+        load_config()
+    assert "ghp_abc123-secret" not in str(info.value)
+
+
+@pytest.mark.parametrize("key", ["GITHUB_TOKEN", "OPENAI_API_KEY", "DB_PASSWORD", "client_secret"])
+def test_mcp_secret_in_env_is_rejected_without_leaking(sa_home: Path, key: str):
+    _write(BASE + f'[mcp_servers.gh]\ncommand = "npx"\nenv = {{ {key} = "sk-very-secret" }}\n')
+    with pytest.raises(ConfigError, match=f'env_vars = \\["{key}"\\]') as info:
+        load_config()
+    assert "sk-very-secret" not in str(info.value)
+
+
+def test_mcp_plain_env_is_allowed(sa_home: Path):
+    env = 'env = { KEYBOARD_LAYOUT = "us", LOG_LEVEL = "info" }'
+    _write(BASE + f'[mcp_servers.fs]\ncommand = "npx"\n{env}\n')
+    assert load_config().mcp_servers["fs"].env == {"KEYBOARD_LAYOUT": "us", "LOG_LEVEL": "info"}
+
+
+def test_mcp_unknown_field_and_bad_values(sa_home: Path):
+    _write(BASE + '[mcp_servers.fs]\ncommand = "npx"\narg = ["x"]\n')
+    with pytest.raises(ConfigError, match="arg"):
+        load_config()
+    _write(BASE + '[mcp_servers.fs]\ncommand = "npx"\nprotocol = "2026"\n')
+    with pytest.raises(ConfigError, match="protocol"):
+        load_config()
+    _write(BASE + '[mcp_servers.fs]\ncommand = "npx"\npermissions = { write_file = "deny" }\n')
+    with pytest.raises(ConfigError, match="permissions"):
+        load_config()
+
+
+def test_example_mcp_block_loads_when_uncommented(sa_home: Path):
+    text = example_config()
+    start = text.index("# [mcp_servers.filesystem]")
+    block = "\n".join(line.removeprefix("# ") for line in text[start:].splitlines())
+    _write(text[:start] + block)
+    server = load_config().mcp_servers["filesystem"]
+    assert server.command == "npx"
+    assert server.args[-1] == "~/notes"
+    assert server.env_vars == ["GITHUB_TOKEN"]
+    assert server.permissions == {"write_file": "allow"}

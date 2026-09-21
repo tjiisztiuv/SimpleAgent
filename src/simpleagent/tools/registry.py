@@ -128,7 +128,7 @@ class ToolRegistry:
         if judgment.decision is Decision.DENY:
             return error(judgment.reason, decision)
         if judgment.decision is Decision.ASK:
-            reason = judgment.reason or f"工具 {name} 会改动文件或执行命令"
+            reason = judgment.reason or tool.confirm_reason or f"工具 {name} 会改动文件或执行命令"
             if self.approver is None:
                 # 无人值守：需要问但没有可以问的人，一律按拒绝处理。
                 # 宁可让模型自己想办法，也不要假装被批准。

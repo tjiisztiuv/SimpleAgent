@@ -100,6 +100,9 @@ async def write_file(args: WriteFileArgs, ctx: ToolContext) -> str: ...
 - `Tool.readonly` 标记这个工具会不会改动外部状态，决定同一批调用是并行还是串行
 - `Tool.permission` 是默认权限等级（`allow` / `ask` / `deny`），`Tool.scope` 报告这次调用会改动
   哪些绝对路径、要跑什么命令。两者都由注册表在执行前交给权限判定器，`Tool` 自己不做判断
+- `Tool.parameters`（M5）：现成的 JSON Schema，给了就原样交给模型，不再从 `args_model` 生成。
+  MCP 工具用它，参数只由通用的 `McpArgs` 查「是个 JSON 对象」，字段校验交给 server。
+  `Tool.confirm_reason`（M5）：需要确认时给人看的说明，没有就用默认的「会改动文件或执行命令」
 - **审批器不再挂在 ToolContext 上**：W2 曾经在 `ToolContext` 上放过 `approver`，
   引入权限判定器之后它成了第二条审批通道，M3 删掉了。审批统一由 `ToolRegistry` 负责：
   先判定，判定结果是 ask 才调审批器
@@ -149,6 +152,26 @@ append-only 的文件表达「撤销」就得靠这种墓碑行；全量重写�
 
 消息历史只能通过 `Session.add` / `add_many` / `truncate` / `record_stats` 改，它们负责同步写盘。
 写盘失败静默忽略（持久化是加分项，磁盘满了不该让对话中断）。
+
+### MCP 客户端（M5，`mcp/`）
+
+手写，不依赖官方 SDK。四层，每层只依赖下一层：
+
+```
+McpManager（manager.py）     多个 server：并行启动、失败隔离、崩溃后下次调用时重启、关闭
+  └ McpServer                一个 server 的句柄，也是 wrap_tools 要的 ToolCaller
+wrap_tools（tools.py）       McpTool → 注册表里的 Tool（mcp__<server>__<tool>、schema 原样、按 annotations 定权限）
+McpClient（client.py）       协议会话：server/discover 探测 → 新协议（每个请求带 _meta）或旧协议（initialize）
+StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Future、超时取消、stderr 排空、关 stdin → SIGTERM → SIGKILL
+```
+
+- **server 跟着进程走，不跟着会话走**：REPL 和 `sa run` 各持有一个 `McpManager`，`sa serve` 在 Runner
+  的后台事件循环里持有一个、所有空间共用。启动时等所有 server 都有结果再接受第一个问题，会话里工具列表不变。
+- **权限**：`readOnlyHint` 的工具（`trust_annotations = true` 时）allow + 可并行，其余 ask；配置里
+  `permissions` 可以按工具覆盖。MCP 工具没有 `scope`，**工作目录边界管不到它们**，边界由 server 自己负责。
+- **子进程环境是白名单**（`HOME` / `PATH` / `LANG` / 代理），密钥用 `env_vars` 只写变量名。
+- server 的 `instructions` 截到 2000 字、标明是第三方内容后，追加到 system prompt 末尾。
+- 详细的取舍和实测记录见 [notes/M5-mcp-client.md](notes/M5-mcp-client.md)。
 
 ### LLM Client 与配置（M1，已实现）
 
@@ -221,8 +244,8 @@ append-only 的文件表达「撤销」就得靠这种墓碑行；全量重写�
 ```
 src/simpleagent/
   cli.py                  ✅ argparse 入口：sa / sa init / sa run / sa sessions / sa serve / sa --resume /
-                          🚧 sa schedule list
-  config.py               ✅ TOML + 环境变量 → pydantic 配置模型
+                          🚧 sa schedule list / sa mcp list
+  config.py               ✅ TOML + 环境变量 → pydantic 配置模型（M5 起含 [mcp_servers.<名字>]）
   config.example.toml     ✅ sa init 使用的配置模板
   events.py               ✅ 事件类型（TextDelta / ReasoningDelta / ApiRequest / ApiResponse /
                           ✅ MessageDone / ToolCallStart / ToolResult / MaxStepsReached）
@@ -236,7 +259,8 @@ src/simpleagent/
   agent/context.py           token 预算、结果清理、压缩（M6）
   tools/                  ✅ Tool 抽象、注册表、7 个内置工具
   tools/base.py           ✅ ToolContext（cwd / output_dir / hidden_env / save_output）、ToolError、
-                          ✅ Tool（readonly / truncate_output / permission / scope）、@tool
+                          ✅ Tool（readonly / truncate_output / permission / scope /
+                          ✅ parameters / confirm_reason）、@tool
   tools/registry.py       ✅ schema 生成、execute（失败转错误文本）、execute_many（只读并行 / 含写串行，分批产出）、输出截断
   tools/walk.py           ✅ 忽略清单、带剪枝的目录遍历、二进制判断、按行读取、可取消的线程执行（glob / grep / read_file / list_dir 共用）
   tools/output.py         ✅ 输出截断：按行数和字符数截断 + 落盘提示
@@ -245,9 +269,16 @@ src/simpleagent/
   scheduler/models.py     🚧 Job：schedules.toml 里的一个任务（cron 校验、下次触发时间、默认工作目录）
   scheduler/store.py      🚧 读 schedules.toml：按任务隔离错误，一个任务写错不连累其余任务
   scheduler/                 定时 daemon、运行日志（M4 后续步骤）
-  mcp/client.py              stdio JSON-RPC MCP 客户端（M5）
+  mcp/transport.py        ✅ MCP stdio 传输层：子进程、按行收发 JSON-RPC、id → Future 多路复用、
+                          ✅ 超时/取消通知、stderr 排空、关 stdin → SIGTERM → SIGKILL（M5）
+  mcp/client.py           ✅ MCP 协议会话：server/discover 探测，新协议每个请求带 _meta、旧 server 退回
+                          ✅ initialize；tools/list 翻页、tools/call 结果转文本（M5）
+  mcp/tools.py            ✅ 配置 → server 子进程（环境变量白名单 + env / env_vars）；MCP 工具 → Tool
+                          ✅ （mcp__<server>__<tool>、schema 原样、按 annotations + 配置定权限）（M5）
+  mcp/manager.py          ✅ McpManager：并行启动、失败隔离、崩溃后下次调用时重启（5 分钟内最多 3 次）、
+                          ✅ instructions 进 system prompt；REPL / sa run / sa serve 共用（M5）
   skills.py                  SKILL.md 发现与按需加载（M7）
-  ui/repl.py              ✅ 交互式 REPL（写操作终端确认）
+  ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
   ui/approve.py           ✅ ConsoleApprover：终端 y / a / 其他键拒绝
   ui/debug.py             ✅ debug 输出：API 调用与工具调用的过程，走 stderr（off / on / verbose / full）

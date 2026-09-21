@@ -24,3 +24,21 @@ def config(sa_home: Path) -> Config:
             },
         }
     )
+
+
+FAKE_MCP_SERVER = Path(__file__).parent / "fixtures" / "mcp" / "fake_mcp_server.py"
+
+
+@pytest.fixture
+def fake_mcp():
+    """造一个指向假 MCP server 的配置：fake_mcp("--era", "modern", tool_timeout=5)。"""
+    import sys
+
+    from simpleagent.config import McpServerConfig
+
+    def make(*flags: str, **fields) -> McpServerConfig:
+        return McpServerConfig(
+            command=sys.executable, args=[str(FAKE_MCP_SERVER), *flags], **fields
+        )
+
+    return make

@@ -160,6 +160,69 @@ class PanelConfig(BaseModel):
     archive_after_minutes: int = Field(30, ge=1)
 
 
+# MCP server 名要拼进工具名 mcp__<server>__<tool>：不能有连续的下划线，也不能太长
+MCP_SERVER_NAME_RE = re.compile(r"[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*")
+MCP_SERVER_NAME_MAX = 24
+# env 里的键名按 _ 切开后有这些段，就当成密钥：值不该写进 config.toml
+_SECRET_PARTS = frozenset(
+    {"KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS"}
+)
+
+
+def looks_secret(name: str) -> bool:
+    """环境变量名看起来是不是密钥（GITHUB_TOKEN、OPENAI_API_KEY……）。按段匹配，KEYBOARD 不算。"""
+    return any(part in _SECRET_PARTS for part in name.upper().split("_"))
+
+
+class McpServerConfig(BaseModel):
+    """一个 stdio MCP server：怎么启动、给它哪些环境变量、它的工具怎么暴露给模型。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    # 不是秘密的设置，原样传给 server。密钥用 env_vars，值不进 config.toml
+    env: dict[str, str] = Field(default_factory=dict)
+    # 要传给 server 的环境变量名；值和 profile 的 api_key_env 一样，先查环境变量再查 .env
+    env_vars: list[str] = Field(default_factory=list)
+    cwd: str | None = None  # server 进程的工作目录；None 继承 sa 的
+    enabled: bool = True
+    # auto：先 server/discover 探测，不行退回 initialize；modern / legacy：只讲一代
+    protocol: Literal["auto", "modern", "legacy"] = "auto"
+    startup_timeout: float = Field(60.0, gt=0)  # 启动 + 列工具的总时限（npx 第一次要下载）
+    tool_timeout: float = Field(60.0, gt=0)  # 单次调用的时限
+    # 用 server 原本的工具名。enabled_tools 不写 = 全部；disabled_tools 从中去掉
+    enabled_tools: list[str] | None = None
+    disabled_tools: list[str] = Field(default_factory=list)
+    # 相信 server 标的 readOnlyHint：标了只读的免确认、可并行。不信任这个 server 就关掉
+    trust_annotations: bool = True
+    # 按工具覆盖上面算出来的权限，比如 { write_file = "allow" }
+    permissions: dict[str, Literal["allow", "ask"]] = Field(default_factory=dict)
+
+    @field_validator("env_vars")
+    @classmethod
+    def _check_env_vars(cls, names: list[str]) -> list[str]:
+        for name in names:
+            if not ENV_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    "要填环境变量名（如 GITHUB_TOKEN），不是值本身；"
+                    f"值写到 {home_dir() / ENV_FILENAME}"
+                )
+        return names
+
+    @field_validator("env")
+    @classmethod
+    def _check_env(cls, env: dict[str, str]) -> dict[str, str]:
+        # 报错里只提键名，不回显值：值很可能就是贴进来的密钥
+        for name in env:
+            if looks_secret(name):
+                raise ValueError(
+                    f"{name} 看起来是密钥，值不要写进 config.toml："
+                    f'改成 env_vars = ["{name}"]，值放环境变量或 {home_dir() / ENV_FILENAME}'
+                )
+        return env
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -173,12 +236,27 @@ class Config(BaseModel):
     trace: TraceConfig = Field(default_factory=TraceConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
+    # MCP server，按配置顺序启动；工具名是 mcp__<名字>__<工具>
+    mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_default_profile(self) -> Config:
         if self.default_profile not in self.profiles:
             raise ValueError(f"default_profile '{self.default_profile}' 不在 profiles 中")
         return self
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _check_mcp_server_names(
+        cls, servers: dict[str, McpServerConfig]
+    ) -> dict[str, McpServerConfig]:
+        for name in servers:
+            if len(name) > MCP_SERVER_NAME_MAX or not MCP_SERVER_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    f"MCP server 名 '{name}' 不合法：只能用字母、数字、- 和单个 _，"
+                    f"最长 {MCP_SERVER_NAME_MAX} 个字符（它要拼进工具名 mcp__<名字>__<工具>）"
+                )
+        return servers
 
     def api_key_env_names(self) -> frozenset[str]:
         """所有 profile 用到的 key 环境变量名：工具启动子进程时要从环境里去掉。"""

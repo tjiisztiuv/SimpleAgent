@@ -126,6 +126,37 @@ def list_schedules(now: datetime | None = None) -> int:
     return 1 if schedules.errors else 0
 
 
+def list_mcp_servers() -> int:
+    """sa mcp list：真的把每个 server 启动一遍，列出状态和工具再关掉。有失败时退出码为 1。
+
+    用不到模型，所以不需要 API key：改完 [mcp_servers.*] 顺手跑一下就能检查。
+    """
+    from simpleagent.mcp.manager import McpManager
+
+    config = load_config()
+    if not config.mcp_servers:
+        print(f"还没有配置 MCP server：在 {config_path()} 里加 [mcp_servers.<名字>]，")
+        print("写上 command 和 args。")
+        return 0
+    manager = McpManager(config.mcp_servers)
+
+    async def check() -> tuple[list[str], bool]:
+        # 关闭之前就把结果取出来：关完所有 server 的状态都是 closed 了
+        try:
+            await manager.start()
+            return manager.describe(tools=True), manager.failed
+        finally:
+            await manager.close()
+
+    enabled = [server.name for server in manager.enabled]
+    if enabled:
+        print(f"启动 {'、'.join(enabled)}……", file=sys.stderr)
+    lines, failed = asyncio.run(check())
+    for line in lines:
+        print(line)
+    return 1 if failed else 0
+
+
 def list_sessions(store: SessionStore, limit: int) -> int:
     rows = store.list(limit=limit)
     if not rows:
@@ -205,6 +236,9 @@ def main(argv: list[str] | None = None) -> int:
         dest="schedule_command", metavar="<action>", required=True
     )
     schedule_commands.add_parser("list", help="列出任务和下次触发时间，写错的任务会标出原因")
+    mcp = commands.add_parser("mcp", help="MCP server（config.toml 里的 [mcp_servers.*]）")
+    mcp_commands = mcp.add_subparsers(dest="mcp_command", metavar="<action>", required=True)
+    mcp_commands.add_parser("list", help="启动每个 server，列出状态和工具（不需要 API key）")
     sessions = commands.add_parser("sessions", help="列出已保存的会话")
     sessions.add_argument("--limit", type=int, default=20, help="最多显示几条，默认 20")
     inbox = commands.add_parser("inbox", help="控制面板的消息：脚本 / 例行任务往这里投结论")
@@ -228,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
             return init_files()
         if args.command == "schedule":
             return list_schedules()
+        if args.command == "mcp":
+            return list_mcp_servers()
         if args.command == "serve":
             from simpleagent.serve.app import make_server
 

@@ -259,3 +259,46 @@ def test_startup_failure_leaves_no_empty_session(config: Config, sa_home):
 
     Repl(config, llm_factory=lambda n, p: FakeLLM([], name=n, profile=p), store=store)
     assert len(store.list()) == 1
+
+
+# ------------------------------------------------------------------ MCP（M5）
+
+
+def test_repl_starts_mcp_and_calls_its_tools(config: Config, fake_mcp, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = config.model_copy(update={"mcp_servers": {"fake": fake_mcp()}})
+    call = {"id": "c1", "name": "mcp__fake__echo", "arguments": {"text": "你好"}}
+    h = Harness(
+        config,
+        {"a": [{"tool_calls": [call]}, "它说了你好"]},
+        inputs=["/mcp", "让它说你好", "/exit"],
+    )
+    assert h.repl.run() == 0
+    out = h.output
+    assert "启动 MCP server：fake（按 Ctrl+C 跳过）" in out
+    assert "MCP：fake ✓ 9 个工具" in out
+    assert "fake   ✓ 旧协议 2025-11-25 · fake-mcp 1.2.3 · 9 个工具" in out  # /mcp
+    assert "→ mcp__fake__echo" in out and "它说了你好" in out
+    request = h.fakes["a"].requests[0]
+    assert "mcp__fake__echo" in [t["function"]["name"] for t in request["tools"]]
+    assert "## fake\n测试用的 server，工具都是假的。" in request["messages"][0]["content"]
+    assert h.repl.mcp.servers[0].state == "closed"  # 退出时关掉了子进程
+
+
+def test_repl_reports_failed_mcp_server(config: Config, tmp_path, monkeypatch):
+    from simpleagent.config import McpServerConfig
+
+    monkeypatch.chdir(tmp_path)
+    ghost = McpServerConfig(command="definitely-not-a-command-sa-test")
+    config = config.model_copy(update={"mcp_servers": {"ghost": ghost}})
+    h = Harness(config, {}, inputs=["/mcp", "/exit"])
+    assert h.repl.run() == 0
+    assert "MCP：ghost ✗ 找不到命令 definitely-not-a-command-sa-test" in h.output
+    assert "（/mcp 看详情）" in h.output
+    assert "ghost   ✗ 连接 MCP server ghost 失败：找不到命令" in h.output
+
+
+async def test_mcp_command_without_servers(config: Config):
+    h = Harness(config, {})
+    await h.repl.handle("/mcp")
+    assert "没有配置 MCP server" in h.output

@@ -31,6 +31,7 @@ from simpleagent.events import (
     ToolResult,
 )
 from simpleagent.llm.client import LLM, LLMClient
+from simpleagent.mcp.manager import McpManager
 from simpleagent.permissions import Policy, WhitelistApprover
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
@@ -105,6 +106,7 @@ class Headless:
             output_dir=home_dir() / TOOL_OUTPUT_DIRNAME,
             hidden_env=config.api_key_env_names(),
         )
+        self.mcp = McpManager(config.mcp_servers)
         # 会话由 CLI 恢复时（sa run --resume）已经落过盘了，这里只负责新开的会话
         if store is not None and session is None:
             store.start(self.session, profile=name, cwd=str(self.cwd))
@@ -114,7 +116,31 @@ class Headless:
         self.out.flush()
 
     async def run(self, prompt: str) -> int:
-        """跑一个任务，返回退出码（0 正常，1 请求失败）。"""
+        """跑一个任务，返回退出码（0 正常，1 请求失败）。
+
+        MCP server 启动失败只警告，不影响退出码：没有它，很多任务照样能做完。
+        """
+        await self._start_mcp()
+        try:
+            return await self._run(prompt)
+        finally:
+            await self.mcp.close()
+
+    async def _start_mcp(self) -> None:
+        if not self.mcp.enabled:
+            return
+        await self.mcp.start()
+        for tool in self.mcp.tools():
+            self.agent.tools.register(tool)
+        self.agent.system_prompt += self.mcp.prompt_section()
+        # 状态走 stderr：`sa run ... > out.txt` 的正文里不混进这些
+        self.err.write(self.mcp.summary() + "\n")
+        for server in self.mcp.servers:
+            if server.state == "failed" and server.error:
+                self.err.writelines(f"  {line}\n" for line in server.error.splitlines())
+        self.err.flush()
+
+    async def _run(self, prompt: str) -> int:
         model = self.agent.llm.profile.model
         # debug 行写 stderr；正文写 stdout。inner 只用来收尾正文分段和 flush，不参与渲染
         inner = Renderer(self.out, color=False, show_reasoning=False)
