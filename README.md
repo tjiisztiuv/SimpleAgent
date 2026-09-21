@@ -45,7 +45,7 @@ sa --version                     # 确认装好了
 ## 第一次使用
 
 ```bash
-sa init                                              # 生成 ~/.simpleagent/config.toml
+sa init                                              # 生成 ~/.simpleagent/config.toml 和 schedules.toml
 echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.simpleagent/.env # 或者直接 export，二选一
 chmod 600 ~/.simpleagent/.env
 sa                                                   # 进入对话，Ctrl+D 或 /exit 退出

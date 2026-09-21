@@ -17,7 +17,7 @@
 4. **注册式扩展**：内置工具、MCP 工具、Skills、子 agent 统一注册成 `Tool`；新 feature 用配置开关接入，方便 A/B 对比。
 5. **确定性测试**：`FakeLLM` 按脚本返回响应，不联网也能测 loop、权限、压缩等逻辑。客户端测试用 `httpx2.MockTransport` 模拟 SSE，走真实的 SDK 解析路径。
 6. **全异步**（asyncio + `AsyncOpenAI`）：并行工具调用、MCP stdio、调度器、流式输出都需要。
-7. **依赖尽量少**：运行时只依赖 `openai`、`pydantic`（openai 已依赖）；M4 再引入 `croniter`。CLI 用标准库 `argparse`。
+7. **依赖尽量少**：运行时只依赖 `openai`、`pydantic`（openai 已依赖）和 `croniter`（M4，算 cron 的下次触发时间）。CLI 用标准库 `argparse`。
 
 ## 整体架构
 
@@ -177,7 +177,9 @@ append-only 的文件表达「撤销」就得靠这种墓碑行；全量重写�
 | `config.toml` | 配置 | M1 |
 | `traces/<session>/<n>.json` | 每次 LLM 请求/响应 | M1 |
 | `sessions/*.jsonl` | 命令行会话持久化（`sa --resume`） | M3 ✅ |
-| `schedules.toml`、`logs/` | 定时任务和运行日志 | M4 |
+| `schedules.toml` | 定时任务定义（`sa init` 生成模板，`sa schedule list` 查看） | M4 🚧 |
+| `jobs/<name>/` | 没写 `cwd` 的定时任务的默认工作目录 | M4 🚧 |
+| `logs/` | 定时任务运行日志 | M4 |
 | `tool_outputs/` | 过长工具输出的完整内容 | M2 |
 | `memory/`、`skills/` | 长期记忆、技能 | M7 |
 
@@ -218,7 +220,8 @@ append-only 的文件表达「撤销」就得靠这种墓碑行；全量重写�
 
 ```
 src/simpleagent/
-  cli.py                  ✅ argparse 入口：sa / sa init / sa run / sa sessions / sa serve / sa --resume
+  cli.py                  ✅ argparse 入口：sa / sa init / sa run / sa sessions / sa serve / sa --resume /
+                          🚧 sa schedule list
   config.py               ✅ TOML + 环境变量 → pydantic 配置模型
   config.example.toml     ✅ sa init 使用的配置模板
   events.py               ✅ 事件类型（TextDelta / ReasoningDelta / ApiRequest / ApiResponse /
@@ -238,7 +241,10 @@ src/simpleagent/
   tools/walk.py           ✅ 忽略清单、带剪枝的目录遍历、二进制判断、按行读取、可取消的线程执行（glob / grep / read_file / list_dir 共用）
   tools/output.py         ✅ 输出截断：按行数和字符数截断 + 落盘提示
   tools/{list_dir,read_file,write_file,edit_file,glob,grep,bash}.py  ✅ 内置工具
-  scheduler/                 定时 daemon（M4）
+  schedules.example.toml  🚧 sa init 生成的定时任务模板
+  scheduler/models.py     🚧 Job：schedules.toml 里的一个任务（cron 校验、下次触发时间、默认工作目录）
+  scheduler/store.py      🚧 读 schedules.toml：按任务隔离错误，一个任务写错不连累其余任务
+  scheduler/                 定时 daemon、运行日志（M4 后续步骤）
   mcp/client.py              stdio JSON-RPC MCP 客户端（M5）
   skills.py                  SKILL.md 发现与按需加载（M7）
   ui/repl.py              ✅ 交互式 REPL（写操作终端确认）
