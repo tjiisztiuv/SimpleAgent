@@ -77,9 +77,16 @@ class FakeLLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         step: int = 0,
+        continue_turn: bool = False,
     ) -> AsyncIterator[Event]:
+        # 收到的是 prepare_messages 之前的历史；continue_turn 记下来，测试里自己按 profile 处理
         self.requests.append(
-            {"messages": copy.deepcopy(messages), "tools": copy.deepcopy(tools), "step": step}
+            {
+                "messages": copy.deepcopy(messages),
+                "tools": copy.deepcopy(tools),
+                "step": step,
+                "continue_turn": continue_turn,
+            }
         )
         # 和真实客户端产出同样的 API 事件：debug 渲染和事件序列的测试才测得到东西
         start = time.monotonic()

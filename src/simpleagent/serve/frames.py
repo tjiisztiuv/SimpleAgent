@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from simpleagent.events import (
     ApiRequest,
     ApiResponse,
+    ContextEdited,
     Event,
     MaxStepsReached,
     MessageDone,
@@ -99,6 +101,21 @@ def event_to_frame(event: Event, session_id: str) -> Frame:
                 "duration_ms": round(event.duration_ms, 1),
                 "decision": event.decision,
                 "truncated": event.truncated,
+            },
+        )
+    if isinstance(event, ContextEdited):
+        return Frame(
+            session_id,
+            "context_edited",
+            {
+                "kind": event.kind,
+                "tokens_before": event.tokens_before,
+                "tokens_after": event.tokens_after,
+                "limit": event.limit,
+                "count": event.count,
+                "usage": None if event.usage is None else asdict(event.usage),
+                "error": event.error,
+                "summary": event.summary(),
             },
         )
     if isinstance(event, MaxStepsReached):

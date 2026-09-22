@@ -24,6 +24,7 @@ from simpleagent.agent.prompt import build_system_prompt
 from simpleagent.agent.session import Session, SessionStore
 from simpleagent.config import TOOL_OUTPUT_DIRNAME, Config, Profile, home_dir
 from simpleagent.events import (
+    ContextEdited,
     MaxStepsReached,
     MessageDone,
     TextDelta,
@@ -105,6 +106,7 @@ class Headless:
             max_steps=config.max_steps,
             output_dir=home_dir() / TOOL_OUTPUT_DIRNAME,
             hidden_env=config.api_key_env_names(),
+            context=config.context,
         )
         self.mcp = McpManager(config.mcp_servers)
         # 会话由 CLI 恢复时（sa run --resume）已经落过盘了，这里只负责新开的会话
@@ -165,6 +167,8 @@ class Headless:
                         self._write(f"\n{format_usage(event, model)}\n")
                 elif isinstance(event, MaxStepsReached):
                     self._write(f"\n[达到 max_steps={event.max_steps}，本轮停止]\n")
+                elif isinstance(event, ContextEdited):
+                    self._write(f"\n[{event.summary()}]\n")
                 elif debug is not None:
                     debug.on_event(event)
                 elif isinstance(event, TextDelta):

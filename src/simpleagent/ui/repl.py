@@ -15,7 +15,8 @@ from typing import TextIO
 
 import openai
 
-from simpleagent.agent.loop import Agent
+from simpleagent.agent.context import ContextUsage, last_turn_cut
+from simpleagent.agent.loop import Agent, CompactError
 from simpleagent.agent.prompt import build_system_prompt
 from simpleagent.agent.session import Session, SessionStore
 from simpleagent.config import (
@@ -27,6 +28,7 @@ from simpleagent.config import (
     home_dir,
 )
 from simpleagent.events import (
+    ContextEdited,
     MaxStepsReached,
     MessageDone,
     ReasoningDelta,
@@ -62,6 +64,8 @@ HELP = '''命令：
   /debug [LEVEL]  查看或切换 debug：off / on / verbose / full（过程输出走 stderr）
   /clear          清空对话历史
   /usage          本会话的 token 用量
+  /context        上下文占了多少、离上限还有多远、由哪些部分构成
+  /compact [重点]  把早期对话压成摘要，只留最后一轮原文；可以说明要保留的重点
   /help           显示帮助
   /exit           退出
 多行输入：单独一行输入 """ 开始，再输入 """ 结束。
@@ -91,6 +95,44 @@ def format_stats(done: MessageDone, model: str) -> str:
     if done.finish_reason == "length":
         parts.append("输出达到 max_tokens 被截断")
     return "[" + " · ".join(parts) + "]"
+
+
+def format_context(usage: ContextUsage, parts: dict[str, int], tool_count: int) -> list[str]:
+    """/context 的输出：总量和上限、精确值与估算各占多少、构成、估算规则的误差。"""
+    lines = [
+        f"上下文 {usage.tokens:,} / {usage.limit:,} token（{usage.ratio:.0%}）"
+        f" · 窗口 {usage.window:,}，给输出留 {usage.reserve:,}"
+    ]
+    if usage.exact:
+        estimated = usage.tokens - usage.exact
+        lines.append(f"  {usage.exact:,} 来自上次请求的实际用量，之后新增 {estimated:,} 为估算")
+    elif usage.factor is not None:
+        lines.append(
+            f"  上次的实际用量已作废（清理 / 压缩过），按字符估再乘校准系数 {usage.factor:.2f}"
+        )
+    else:
+        lines.append(
+            "  还没有实际用量（没请求过、刚恢复会话、换过模型或服务不返回 usage），全部按字符估"
+        )
+    lines.append(
+        "  构成（估算）："
+        + " · ".join(
+            [
+                f"系统提示 {parts.get('system', 0):,}",
+                f"工具 {tool_count} 个 {parts.get('tools', 0):,}",
+                f"用户 {parts.get('user', 0):,}",
+                f"助手 {parts.get('assistant', 0):,}",
+                f"工具结果 {parts.get('tool', 0):,}",
+            ]
+        )
+    )
+    if usage.exact:
+        diff = usage.exact_estimate / usage.exact - 1
+        lines.append(
+            f"  校准：上次请求实际 {usage.exact:,}，同一段按字符估 {usage.exact_estimate:,}"
+            f"（{'高' if diff >= 0 else '低'}估 {abs(diff):.0%}）"
+        )
+    return lines
 
 
 def describe_error(error: openai.APIError, profile: Profile) -> str:
@@ -219,6 +261,7 @@ class Repl:
             max_steps=config.max_steps,
             output_dir=output_dir,
             hidden_env=config.api_key_env_names(),
+            context=config.context,
         )
         # MCP server 在 run() 里、同一个事件循环中启动：子进程和管道都绑定在循环上
         self.mcp = McpManager(config.mcp_servers)
@@ -342,6 +385,9 @@ class Repl:
                     self.print(
                         f"[达到 max_steps={event.max_steps}，本轮停止；输入“继续”可以接着做]", DIM
                     )
+                elif isinstance(event, ContextEdited):
+                    renderer.end()
+                    self.print(f"[{event.summary()}]", DIM)
                 elif debug is not None:
                     debug.on_event(event)
                 else:
@@ -364,7 +410,8 @@ class Repl:
             case "help":
                 self.print(HELP)
             case "clear":
-                self.session.messages.clear()
+                # 走 truncate 才会写进 JSONL；直接清列表的话，--resume 之后历史又回来了
+                self.session.truncate(0)
                 self.print("已清空对话历史")
             case "usage":
                 u = self.session.usage
@@ -373,6 +420,17 @@ class Repl:
                     f" · 输入 {u.prompt_tokens:,}（缓存 {u.cached_tokens:,}）"
                     f" · 输出 {u.completion_tokens:,}（思考 {u.reasoning_tokens:,}）"
                 )
+            case "context":
+                lines = format_context(
+                    self.agent.context_usage(self.session),
+                    self.agent.context_breakdown(self.session),
+                    len(self.agent.tools.schemas()),
+                )
+                self.print(lines[0])
+                for line in lines[1:]:
+                    self.print(line, DIM)
+            case "compact":
+                await self._compact(arg)
             case "model":
                 await self._switch_model(arg)
             case "tools":
@@ -390,6 +448,22 @@ class Repl:
             case _:
                 self.print(f"未知命令 /{name}，输入 /help 查看")
         return True
+
+    async def _compact(self, instructions: str) -> None:
+        # 只留最后一轮：手动压缩就是想腾地方，按自动压缩的 1/4 留，对话不长时几乎压不掉什么
+        cut = last_turn_cut(self.session.messages)
+        if cut is None:
+            self.print("没有可以压缩的内容（历史太短，或者只剩上一次的摘要）", DIM)
+            return
+        try:
+            edited = await self.agent.compact(self.session, instructions or None, cut=cut)
+        except CompactError as e:
+            self.print(f"压缩失败：{e}", RED)
+            return
+        if edited is None:
+            self.print("没有可以压缩的内容（历史太短，或者只剩上一次的摘要）", DIM)
+            return
+        self.print(f"[{edited.summary()}]", DIM)
 
     def _set_debug(self, level: str) -> None:
         if not level:

@@ -130,6 +130,41 @@ class ToolResult:
 
 
 @dataclass
+class ContextEdited:
+    """上下文快满了，loop 腾了地方（M6）：清理旧工具结果，或把早期对话压成摘要。
+
+    前端据此显示一行提示；历史本身已经改好（Session.replace / compact 同步写盘了）。
+    """
+
+    kind: str  # "clear"：旧工具结果换成了占位符；"compact"：早期对话换成了摘要
+    tokens_before: int  # 腾地方前后，下一次请求预计的输入 token
+    tokens_after: int
+    limit: int  # 输入上限（窗口 − 给输出留的余量），用来算百分比
+    count: int = 0  # clear：清理了几个工具结果；compact：压掉了前几条消息
+    usage: Usage | None = None  # compact：摘要请求本身的用量，看它命中了多少缓存
+    error: str | None = None  # compact：摘要请求失败的原因；这时历史没动，本轮不再尝试
+
+    def summary(self) -> str:
+        if self.error is not None:
+            return f"摘要压缩失败（{self.error}），这一轮不再尝试"
+        before, after = self.tokens_before / self.limit, self.tokens_after / self.limit
+        change = (
+            f"上下文 {self.tokens_before:,} → {self.tokens_after:,} token"
+            f"（{before:.0%} → {after:.0%}）"
+        )
+        if self.kind != "compact":
+            return f"清理了 {self.count} 个旧工具结果，{change}"
+        text = f"压缩了前 {self.count} 条消息：{change}"
+        if self.usage is not None:
+            u = self.usage
+            text += (
+                f" · 摘要请求 输入 {u.prompt_tokens:,}（缓存 {u.cached_tokens:,}）"
+                f"输出 {u.completion_tokens:,}"
+            )
+        return text
+
+
+@dataclass
 class MaxStepsReached:
     """一轮对话请求模型的次数达到上限，loop 停止。"""
 
@@ -144,5 +179,6 @@ Event = (
     | MessageDone
     | ToolCallStart
     | ToolResult
+    | ContextEdited
     | MaxStepsReached
 )
