@@ -219,6 +219,8 @@ class McpServerConfig(BaseModel):
     env_vars: list[str] = Field(default_factory=list)
     cwd: str | None = None  # server 进程的工作目录；None 继承 sa 的
     enabled: bool = True
+    # eager：sa 启动时就拉起来；lazy：用上次缓存的工具清单登记工具，模型第一次调用时才启动
+    start: Literal["eager", "lazy"] = "eager"
     # auto：先 server/discover 探测，不行退回 initialize；modern / legacy：只讲一代
     protocol: Literal["auto", "modern", "legacy"] = "auto"
     startup_timeout: float = Field(60.0, gt=0)  # 启动 + 列工具的总时限（npx 第一次要下载）

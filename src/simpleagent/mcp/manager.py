@@ -14,6 +14,9 @@ REPL 和 sa run 各持有一个 McpManager；sa serve 在 Runner 的后台事件
 - 中途崩溃的那次调用不自动重试：server 可能已经写了一半文件、发出了邮件，再调一次就
   重复了。把情况告诉模型，由它决定。
 - 重启后不刷新工具列表：理由同第一条。
+- 懒启动（start = "lazy"）：有上次的工具清单缓存（见 cache.py）就直接拿它登记工具，
+  不拉起进程，模型第一次调用时才启动。启动不用等，工具列表照样在第一次请求前定下来。
+  真连上后工具和缓存对不上，本次会话照旧（理由同第一条），缓存更新，下次启动生效。
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from simpleagent.config import McpServerConfig
-from simpleagent.mcp.client import CallResult, McpClient, ServerInfo
+from simpleagent.mcp.cache import load_cached, save_cached
+from simpleagent.mcp.client import CallResult, McpClient, McpTool, ServerInfo
 from simpleagent.mcp.tools import client_from_config, wrap_tools
 from simpleagent.mcp.transport import McpError
 from simpleagent.tools.base import Tool
@@ -35,7 +39,8 @@ MAX_RESTARTS = 3  # RESTART_WINDOW 秒内最多自动重启这么多次
 RESTART_WINDOW = 300.0
 INSTRUCTIONS_LIMIT = 2000  # 每个 server 的 instructions 最多放进 system prompt 这么多字
 
-State = Literal["disabled", "idle", "starting", "ready", "failed", "closed"]
+# standby：懒启动的 server，工具已按缓存登记，进程还没起
+State = Literal["disabled", "idle", "standby", "starting", "ready", "failed", "closed"]
 
 MID_CALL_EXIT = (
     "server 在这次调用中途退出了：这次调用可能没执行完，也可能已经生效。"
@@ -65,6 +70,9 @@ class McpServer:
         self.error: str | None = None  # 最近一次启动 / 重启失败的原因
         self.restarts = 0
         self.elapsed: float | None = None  # 启动花了多久
+        # 懒启动时登记工具用的缓存清单；真连上后和它对不上就是 stale（本次会话不刷新）
+        self._cached_tools: list[McpTool] | None = None
+        self.stale = False
         self._client: McpClient | None = None
         self._restart_times: deque[float] = deque()
         self._lock = asyncio.Lock()
@@ -75,17 +83,39 @@ class McpServer:
 
     # ------------------------------------------------------------------ 生命周期
 
+    def standby(self) -> None:
+        """懒启动且有可用缓存：按缓存登记工具，不启动进程。没缓存就留在 idle，照常启动一次。"""
+        if self.state != "idle" or self.config.start != "lazy":
+            return
+        cached = load_cached(self.name, self.config)
+        if cached is None:
+            return
+        self.info = cached.info
+        self.tools, self.warnings = wrap_tools(self.name, self.config, cached.tools, self)
+        self._cached_tools = cached.tools
+        self.state = "standby"
+
     async def start(self) -> None:
         """启动并列出工具。不抛异常（被取消除外）：失败原因记在 state / error 上。"""
         if self.state != "idle":
             return
+        try:
+            info, tools = await self._launch()
+        except McpError:
+            return
+        self.info = info
+        self.tools, self.warnings = wrap_tools(self.name, self.config, tools, self)
+        self._remember(info, tools)
+
+    async def _launch(self) -> tuple[ServerInfo, list[McpTool]]:
+        """起进程、握手、列工具，成功后 state 是 ready。失败抛 McpError，原因也记在 error 上。"""
         self.state = "starting"
         started = time.monotonic()
         try:
             client = client_from_config(self.name, self.config)
         except McpError as e:  # 比如 env_vars 里的变量找不到
             self._failed(f"连接 MCP server {self.name} 失败：{e}")
-            return
+            raise McpError(self.error) from None
         self._client = client  # 先记下来：启动到一半被关，close() 也能关掉这个子进程
         try:
             info = await client.connect(timeout=self.config.startup_timeout)
@@ -94,15 +124,24 @@ class McpServer:
         except McpError as e:
             await client.close()
             self._failed(str(e))
-            return
+            raise
         except asyncio.CancelledError:  # 启动时按了 Ctrl+C：别留下半启动的子进程
             await client.close()
             self._failed("启动被跳过")
             raise
-        self.info = info
-        self.tools, self.warnings = wrap_tools(self.name, self.config, tools, self)
         self.elapsed = time.monotonic() - started
         self.state = "ready"
+        self.error = None
+        return info, tools
+
+    def _remember(self, info: ServerInfo, tools: list[McpTool]) -> None:
+        """懒启动的 server 连上后，把工具清单写进缓存，下次启动就不用等它。"""
+        if self.config.start != "lazy":
+            return
+        try:
+            save_cached(self.name, self.config, info, tools)
+        except OSError as e:
+            self.warnings.append(f"{self.name}：工具清单缓存写不进去，下次启动还要等它：{e}")
 
     async def close(self) -> None:
         if self.state != "disabled":
@@ -134,6 +173,8 @@ class McpServer:
         async with self._lock:
             if self.state == "closed":
                 raise McpError(f"MCP server {self.name} 已关闭")
+            if self.state == "standby":  # 懒启动的第一次调用：这是启动，不算重启
+                return await self._launch_standby()
             client = self._client
             if client is not None and client.transport.alive and client.info is not None:
                 return client
@@ -162,6 +203,16 @@ class McpServer:
             self.error = None
             return new
 
+    async def _launch_standby(self) -> McpClient:
+        info, tools = await self._launch()
+        self.info = info
+        # 工具在会话开始时已经按缓存登记了，这里不换（前缀缓存、模型刚看到的工具）；
+        # 对不上只记下来，缓存照样更新，下次启动生效
+        self.stale = tools != self._cached_tools
+        self._remember(info, tools)
+        assert self._client is not None
+        return self._client
+
     # ------------------------------------------------------------------ 显示
 
     def schema_chars(self) -> int:
@@ -184,9 +235,25 @@ class McpManager:
     def enabled(self) -> list[McpServer]:
         return [server for server in self.servers if server.config.enabled]
 
-    async def start(self) -> None:
-        """并行启动所有启用的 server，等它们都有结果。单个失败不影响别的。"""
-        await asyncio.gather(*(server.start() for server in self.enabled))
+    def standby(self) -> None:
+        """懒启动且有缓存的 server 先按缓存登记工具（不起进程）。start() 会先调它；
+        单独调是为了在启动前知道哪些 server 真要等（REPL 的「启动 MCP server：……」提示）。"""
+        for server in self.enabled:
+            server.standby()
+
+    @property
+    def to_launch(self) -> list[McpServer]:
+        """start() 会真正拉起进程的 server。"""
+        return [server for server in self.enabled if server.state == "idle"]
+
+    async def start(self, *, force: bool = False) -> None:
+        """并行启动所有启用的 server，等它们都有结果。单个失败不影响别的。
+
+        懒启动的 server 有缓存就不启动；force=True 连它们也启动（sa mcp list 用，顺带刷新缓存）。
+        """
+        if not force:
+            self.standby()
+        await asyncio.gather(*(server.start() for server in self.to_launch))
 
     async def close(self) -> None:
         await asyncio.gather(*(server.close() for server in self.servers), return_exceptions=True)
@@ -218,6 +285,8 @@ class McpManager:
         for server in self.enabled:
             if server.state == "ready":
                 parts.append(f"{server.name} ✓ {len(server.tools)} 个工具（{server.elapsed:.1f}s）")
+            elif server.state == "standby":
+                parts.append(f"{server.name} ◦ {len(server.tools)} 个工具（按需启动）")
             elif server.state == "failed":
                 parts.append(f"{server.name} ✗ {server.short_error()}")
         return f"MCP：{' · '.join(parts)}" if parts else ""
@@ -249,13 +318,16 @@ class McpManager:
                     lines.append("    server 已退出，下次调用时自动重启")
                 if client is not None and client.tools_changed:
                     lines.append("    server 说工具列表变了：本次会话不刷新，重启 sa 后生效")
-                if tools:
-                    for tool in server.tools:
-                        mark = "免确认" if tool.permission == "allow" else "需确认"
-                        if tool.readonly:
-                            mark += " · 可并行"
-                        lines.append(f"    {tool.name:<48} {mark}")
-                lines.extend(f"    ! {warning}" for warning in server.warnings)
+                if server.stale:
+                    lines.append("    实际的工具和缓存的不一样：本次会话按缓存的来，下次启动生效")
+                lines.extend(_detail_lines(server, tools))
+            elif server.state == "standby":
+                size = server.schema_chars() / 1000
+                lines.append(
+                    f"{head}◦ 按需启动 · {len(server.tools)} 个工具，schema 约 {size:.1f}k 字符"
+                    "（上次连上时缓存的），第一次调用时启动"
+                )
+                lines.extend(_detail_lines(server, tools))
             elif server.state == "failed":
                 first, *rest = (server.error or "未知错误").splitlines()
                 lines.append(f"{head}✗ {first}")
@@ -269,3 +341,16 @@ class McpManager:
                 }.get(server.state, server.state)
                 lines.append(f"{head}- {label}")
         return lines
+
+
+def _detail_lines(server: McpServer, tools: bool) -> list[str]:
+    """describe 里 server 状态行下面的工具清单和警告。"""
+    lines = []
+    if tools:
+        for tool in server.tools:
+            mark = "免确认" if tool.permission == "allow" else "需确认"
+            if tool.readonly:
+                mark += " · 可并行"
+            lines.append(f"    {tool.name:<48} {mark}")
+    lines.extend(f"    ! {warning}" for warning in server.warnings)
+    return lines

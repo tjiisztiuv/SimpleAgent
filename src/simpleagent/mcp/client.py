@@ -21,6 +21,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, Literal
 
 from simpleagent.mcp.transport import (
@@ -84,6 +85,10 @@ class CallResult:
 
 
 # ---------------------------------------------------------------------- 纯函数
+
+
+def _is_npx(command: str) -> bool:
+    return Path(command).name in ("npx", "npx.cmd")
 
 
 def choose_version(supported: Iterable[str]) -> str | None:
@@ -349,7 +354,16 @@ class McpClient:
         tail = self.transport.stderr_tail(5)
         if tail and tail not in message:
             message += f"\n最近的 stderr：\n{tail}"
-        if (
+        if isinstance(error, McpTimeout) and not tail and _is_npx(self.transport.command):
+            # npx 不带版本号时每次启动都要联网查最新版，连不上 npm 仓库就一直挂着、一行输出都没有；
+            # 这时「再试一次」没用
+            message += (
+                "\n提示：server 一行输出都没有，多半是 npx 卡在联网查 npm 仓库"
+                "（每次启动都会查最新版，网络或代理不通就一直挂着）。"
+                '在 args 最前面加 "--prefer-offline"，本地有缓存就不联网；'
+                "或者 npm install -g 装好，把 command 换成装好的命令。"
+            )
+        elif (
             self._stage == "discover"
             and self.protocol == "auto"
             and not isinstance(error, RpcError | McpTimeout)

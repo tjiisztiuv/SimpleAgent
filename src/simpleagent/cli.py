@@ -161,7 +161,7 @@ def list_mcp_servers() -> int:
     async def check() -> tuple[list[str], bool]:
         # 关闭之前就把结果取出来：关完所有 server 的状态都是 closed 了
         try:
-            await manager.start()
+            await manager.start(force=True)  # 懒启动的也真启动一遍，顺带刷新它们的工具缓存
             return manager.describe(tools=True), manager.failed
         finally:
             await manager.close()

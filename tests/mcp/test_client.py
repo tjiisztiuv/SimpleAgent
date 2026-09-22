@@ -174,6 +174,32 @@ async def test_command_not_found_has_no_probe_hint() -> None:
     assert "提示" not in str(info.value)
 
 
+async def test_silent_npx_hints_prefer_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """npx 连不上 npm 仓库时一直挂着、一行输出都没有：提示加 --prefer-offline，不说「再试一次」。"""
+    monkeypatch.setattr(client_module, "PROBE_TIMEOUT", 0.2)
+    npx = tmp_path / "npx"
+    npx.write_text("#!/bin/sh\nexec sleep 30\n")
+    npx.chmod(0o755)
+    client = McpClient(StdioTransport("fs", str(npx), ["-y", "some-server"]))
+    with pytest.raises(McpError) as info:
+        await client.connect(timeout=0.6)
+    message = str(info.value)
+    assert "--prefer-offline" in message
+    assert "再试一次" not in message
+
+
+async def test_slow_non_npx_server_keeps_retry_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "PROBE_TIMEOUT", 0.2)
+    client = fake("--era", "legacy", "--slow-start", "5")
+    with pytest.raises(McpError) as info:
+        await client.connect(timeout=0.6)
+    message = str(info.value)
+    assert "再试一次" in message
+    assert "--prefer-offline" not in message
+
+
 # ------------------------------------------------------------------ 工具
 
 

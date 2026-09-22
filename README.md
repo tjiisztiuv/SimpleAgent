@@ -139,8 +139,11 @@ API key 只从环境变量或 `~/.simpleagent/.env` 读，不写进配置文件�
 ```toml
 [mcp_servers.filesystem]
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
+args = ["--prefer-offline", "-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
 ```
+
+`--prefer-offline` 让 npx 本地有缓存就不联网；不加的话每次启动都会去 npm 仓库查最新版，
+网络或代理不通时会一直挂到超时。
 
 ```bash
 sa mcp list              # 把每个 server 启动一遍，列出状态和工具（不需要 API key）
@@ -148,6 +151,9 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
 
 - **启动**：`sa` / `sa run` / `sa serve` 启动时把所有 server 一起拉起来，等它们都有结果再开始；
   某个 server 起不来只影响它自己。REPL 里按 Ctrl+C 可以跳过卡住的 server，`/mcp` 看详情。
+- **按需启动**：不常用的 server 写 `start = "lazy"`。sa 记住它上次连上时的工具清单
+  （`~/.simpleagent/mcp_cache/`），之后启动就不等它，模型第一次调用它的工具时才拉起来；
+  起不来的话报错交给模型，不影响启动。第一次还没缓存时照常启动一次；`sa mcp list` 会真连一遍并刷新缓存。
 - **权限**：server 标了只读（`readOnlyHint`）的工具免确认，其余要确认，`sa run` 里要用
   `--allow mcp__filesystem__write_file` 这样逐个放行。**工作目录边界管不到 MCP 工具**，
   server 能碰什么由它自己的参数决定——上面给的 `~/notes` 就是它能读写的全部范围。
@@ -185,6 +191,7 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
   spaces/              工作台的空间和它们的会话
   panel/               控制面板的消息和待办
   tool_outputs/        被截断的完整工具输出，保留 7 天
+  mcp_cache/           按需启动的 MCP server 上次的工具清单
   traces/              每次请求和响应的原始记录
 ```
 

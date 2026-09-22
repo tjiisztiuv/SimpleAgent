@@ -16,6 +16,8 @@ import pytest
 from simpleagent.config import McpServerConfig
 from simpleagent.mcp import McpError
 from simpleagent.mcp import manager as manager_module
+from simpleagent.mcp.cache import cache_path, load_cached, save_cached
+from simpleagent.mcp.client import McpTool, ServerInfo
 from simpleagent.mcp.manager import MID_CALL_EXIT, PROMPT_HEADER, McpManager
 
 FAKE_SERVER = Path(__file__).parent.parent / "fixtures" / "mcp" / "fake_mcp_server.py"
@@ -181,6 +183,154 @@ async def test_calls_after_close_fail() -> None:
     with pytest.raises(McpError, match="已关闭"):
         await manager.servers[0].call_tool("echo", {"text": "hi"}, timeout=5)
     assert manager.describe() == ["fake   - 已关闭"]
+
+
+# ------------------------------------------------------------------ 懒启动
+
+
+async def warm_cache(config: McpServerConfig, name: str = "fake") -> int:
+    """真启动一次，让懒启动的 server 写下工具缓存；返回登记的工具数。"""
+    manager = McpManager({name: config})
+    await manager.start()
+    try:
+        assert manager.servers[0].state == "ready"
+        return len(manager.tools())
+    finally:
+        await manager.close()
+
+
+async def test_lazy_without_cache_starts_and_writes_cache(sa_home: Path) -> None:
+    await warm_cache(fake(start="lazy"))
+    assert load_cached("fake", fake(start="lazy")) is not None
+    assert cache_path("fake") == sa_home / "mcp_cache" / "fake.json"
+
+
+async def test_eager_server_writes_no_cache(sa_home: Path) -> None:
+    await warm_cache(fake())
+    assert not (sa_home / "mcp_cache").exists()
+
+
+async def test_lazy_with_cache_waits_for_first_call(sa_home: Path, tmp_path: Path) -> None:
+    record = tmp_path / "received.jsonl"
+    config = fake("--record", str(record), start="lazy")
+    count = await warm_cache(config)
+    assert methods(record).count("initialize") == 1
+
+    manager = McpManager({"fake": config})
+    manager.standby()
+    assert manager.to_launch == []  # REPL 据此不打「启动 MCP server」
+    await manager.start()
+    server = manager.servers[0]
+    try:
+        assert server.state == "standby"
+        assert methods(record).count("initialize") == 1  # 没起新进程
+        assert len(manager.tools()) == count  # 工具照样登记好了
+        assert manager.prompt_section().endswith("测试用的 server，工具都是假的。")
+        assert manager.summary() == f"MCP：fake ◦ {count} 个工具（按需启动）"
+        assert "按需启动" in manager.describe()[0]
+
+        assert (await server.call_tool("echo", {"text": "hi"}, timeout=5)).text == "hi"
+        assert server.state == "ready"
+        assert server.restarts == 0  # 第一次启动不算重启
+        assert not server.stale
+        assert methods(record).count("initialize") == 2
+    finally:
+        await manager.close()
+
+
+async def test_lazy_parallel_first_calls_launch_once(sa_home: Path, tmp_path: Path) -> None:
+    record = tmp_path / "received.jsonl"
+    config = fake("--record", str(record), start="lazy")
+    await warm_cache(config)
+    manager = McpManager({"fake": config})
+    await manager.start()
+    server = manager.servers[0]
+    try:
+        results = await asyncio.gather(
+            server.call_tool("echo", {"text": "a"}, timeout=5),
+            server.call_tool("echo", {"text": "b"}, timeout=5),
+        )
+        assert [r.text for r in results] == ["a", "b"]
+        assert methods(record).count("initialize") == 2  # 预热一次 + 懒启动一次
+    finally:
+        await manager.close()
+
+
+async def test_force_start_launches_lazy_servers(sa_home: Path) -> None:
+    """sa mcp list 要真的连一遍：检查配置，也顺带刷新缓存。"""
+    await warm_cache(fake(start="lazy"))
+    manager = McpManager({"fake": fake(start="lazy")})
+    await manager.start(force=True)
+    try:
+        assert manager.servers[0].state == "ready"
+    finally:
+        await manager.close()
+
+
+async def test_lazy_cache_follows_launch_args(sa_home: Path) -> None:
+    await warm_cache(fake("--era", "legacy", start="lazy"))
+    # 启动参数变了：可能已经是另一个 server，缓存作废，照常启动
+    assert load_cached("fake", fake("--era", "modern", start="lazy")) is None
+    # 只改过滤和权限：原始工具清单还能用
+    filtered = fake("--era", "legacy", start="lazy", disabled_tools=["crash"])
+    assert load_cached("fake", filtered) is not None
+    manager = McpManager({"fake": filtered})
+    await manager.start()
+    try:
+        assert manager.servers[0].state == "standby"
+        assert "mcp__fake__crash" not in [tool.name for tool in manager.tools()]
+    finally:
+        await manager.close()
+
+
+async def test_broken_cache_is_ignored(sa_home: Path) -> None:
+    await warm_cache(fake(start="lazy"))
+    cache_path("fake").write_text("{not json", encoding="utf-8")
+    assert load_cached("fake", fake(start="lazy")) is None
+    await warm_cache(fake(start="lazy"))  # 当没有缓存：照常启动，重新写好
+    assert load_cached("fake", fake(start="lazy")) is not None
+
+
+async def test_lazy_stale_cache_keeps_session_tools(sa_home: Path) -> None:
+    """真实工具和缓存对不上：本次会话的工具列表不变，缓存更新，下次启动生效。"""
+    config = fake(start="lazy")
+    count = await warm_cache(config)
+    data = json.loads(cache_path("fake").read_text(encoding="utf-8"))
+    data["tools"] = [tool for tool in data["tools"] if tool["name"] != "toggle"]
+    cache_path("fake").write_text(json.dumps(data), encoding="utf-8")
+
+    manager = McpManager({"fake": config})
+    await manager.start()
+    server = manager.servers[0]
+    try:
+        assert len(manager.tools()) == count - 1
+        await server.call_tool("echo", {"text": "hi"}, timeout=5)
+        assert server.stale
+        assert len(manager.tools()) == count - 1
+        assert "下次启动生效" in "\n".join(manager.describe())
+    finally:
+        await manager.close()
+    cached = load_cached("fake", config)
+    assert cached is not None and "toggle" in [tool.name for tool in cached.tools]
+
+
+async def test_lazy_launch_failure_surfaces_on_call(sa_home: Path) -> None:
+    """缓存里有工具、server 却起不来：启动不受影响，调用时把原因交给模型。"""
+    ghost = McpServerConfig(command="definitely-not-a-command-sa-test", start="lazy")
+    info = ServerInfo("legacy", "2025-11-25", "ghost", "0", {"tools": {}})
+    save_cached("ghost", ghost, info, [McpTool("echo", "回显", {"type": "object"})])
+
+    manager = McpManager({"ghost": ghost})
+    await manager.start()
+    server = manager.servers[0]
+    try:
+        assert server.state == "standby" and not manager.failed
+        with pytest.raises(McpError, match="找不到命令"):
+            await server.call_tool("echo", {}, timeout=5)
+        assert server.state == "failed"
+        assert [tool.name for tool in manager.tools()] == ["mcp__ghost__echo"]
+    finally:
+        await manager.close()
 
 
 # ------------------------------------------------------------------ instructions 和显示

@@ -325,10 +325,11 @@ class Repl:
     def _start_mcp(self, runner: asyncio.Runner) -> None:
         """启动配置里的 MCP server，把它们的工具注册进来。等全部有结果再接受第一个问题：
         工具列表在第一次请求前定下来，会话里就不再变，前缀缓存才能命中。"""
-        names = [server.name for server in self.mcp.enabled]
-        if not names:
+        if not self.mcp.enabled:
             return
-        self.print(f"启动 MCP server：{'、'.join(names)}（按 Ctrl+C 跳过）", DIM)
+        self.mcp.standby()  # 懒启动且有缓存的不用等，先挑出来，提示里只列真要等的
+        if names := [server.name for server in self.mcp.to_launch]:
+            self.print(f"启动 MCP server：{'、'.join(names)}（按 Ctrl+C 跳过）", DIM)
         try:
             runner.run(self.mcp.start())
         except KeyboardInterrupt:

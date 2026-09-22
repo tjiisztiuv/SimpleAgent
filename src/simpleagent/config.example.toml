@@ -85,12 +85,16 @@ reasoning_field = "reasoning"  # 新版 Ollama 的思考内容字段名
 # 下面给 filesystem server 的目录，就是它能读写的全部范围。
 # [mcp_servers.filesystem]
 # command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
+# args = ["--prefer-offline", "-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
+#                                # --prefer-offline：本地有缓存就不联网。不加的话 npx 每次启动都查最新版，
+#                                # 连不上 npm 仓库时会一直挂到 startup_timeout
 # env = { LOG_LEVEL = "info" }   # 不是秘密的设置，原样传给 server
 # env_vars = ["GITHUB_TOKEN"]    # 需要密钥的 server（这里只是示例）：只写变量名，值放环境变量或
 #                                # ~/.simpleagent/.env。其余环境变量默认不传，只给 HOME / PATH / LANG / 代理这些
 # cwd = "~"                      # server 进程的工作目录，默认继承 sa 的
 # enabled = true
+# start = "eager"                # eager：sa 启动时就拉起来；lazy：按需启动——用上次连上时缓存的工具清单
+#                                # 登记工具，模型第一次调用时才启动。没缓存时照常启动一次，之后才按需
 # protocol = "auto"              # auto：先探测新协议，不行退回旧协议；也可以写 modern / legacy
 # startup_timeout = 60           # 启动 + 列工具的总时限（npx 第一次要下载）
 # tool_timeout = 60              # 单次调用的时限

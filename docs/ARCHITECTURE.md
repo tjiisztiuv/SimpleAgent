@@ -162,7 +162,7 @@ append-only 的文件表达「撤销」就得靠这种墓碑行；全量重写�
 手写，不依赖官方 SDK。四层，每层只依赖下一层：
 
 ```
-McpManager（manager.py）     多个 server：并行启动、失败隔离、崩溃后下次调用时重启、关闭
+McpManager（manager.py）     多个 server：并行启动、失败隔离、崩溃后下次调用时重启、按需启动、关闭
   └ McpServer                一个 server 的句柄，也是 wrap_tools 要的 ToolCaller
 wrap_tools（tools.py）       McpTool → 注册表里的 Tool（mcp__<server>__<tool>、schema 原样、按 annotations 定权限）
 McpClient（client.py）       协议会话：server/discover 探测 → 新协议（每个请求带 _meta）或旧协议（initialize）
@@ -171,6 +171,10 @@ StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Futur
 
 - **server 跟着进程走，不跟着会话走**：REPL 和 `sa run` 各持有一个 `McpManager`，`sa serve` 在 Runner
   的后台事件循环里持有一个、所有空间共用。启动时等所有 server 都有结果再接受第一个问题，会话里工具列表不变。
+- **按需启动**（`start = "lazy"`）：工具列表要在第一次请求前定下来，server 却还没起，所以靠缓存——
+  连上时把原始工具清单写到 `mcp_cache/<名字>.json`（`mcp/cache.py`，带启动参数指纹，参数变了就作废），
+  下次启动直接拿它登记工具（状态 `standby`），第一次调用时才起进程（不算重启）。真实工具和缓存对不上时
+  本次会话照旧、缓存更新，下次启动生效。没缓存就照常启动一次。
 - **权限**：`readOnlyHint` 的工具（`trust_annotations = true` 时）allow + 可并行，其余 ask；配置里
   `permissions` 可以按工具覆盖。MCP 工具没有 `scope`，**工作目录边界管不到它们**，边界由 server 自己负责。
 - **子进程环境是白名单**（`HOME` / `PATH` / `LANG` / 代理），密钥用 `env_vars` 只写变量名。
@@ -262,6 +266,7 @@ StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Futur
 | `jobs/<name>/` | 没写 `cwd` 的定时任务的默认工作目录 | M4 🚧 |
 | `logs/` | 定时任务运行日志 | M4 |
 | `tool_outputs/` | 过长工具输出的完整内容 | M2 |
+| `mcp_cache/<name>.json` | 按需启动（`start = "lazy"`）的 MCP server 上次的工具清单 | M5 |
 | `memory/`、`skills/` | 长期记忆、技能 | M7 |
 
 ## 长期形态：个人 AI 工作台（具体内容待设计）
@@ -335,7 +340,8 @@ src/simpleagent/
   mcp/tools.py            ✅ 配置 → server 子进程（环境变量白名单 + env / env_vars）；MCP 工具 → Tool
                           ✅ （mcp__<server>__<tool>、schema 原样、按 annotations + 配置定权限）（M5）
   mcp/manager.py          ✅ McpManager：并行启动、失败隔离、崩溃后下次调用时重启（5 分钟内最多 3 次）、
-                          ✅ instructions 进 system prompt；REPL / sa run / sa serve 共用（M5）
+                          ✅ instructions 进 system prompt；REPL / sa run / sa serve 共用（M5）；按需启动
+  mcp/cache.py            ✅ 按需启动用的工具清单缓存（启动参数指纹、原子写）
   skills.py                  SKILL.md 发现与按需加载（M7）
   ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp，M6 起有 /context、/compact）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
