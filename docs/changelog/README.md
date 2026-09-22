@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-22 重打 v0.2.0 tag，发布日志补全 v0.1.0 以来的全部改动](2026-09-22-v0.2.0-retag.md)
 - [2026-09-22 MCP：修复 npx 卡住时的误导提示 + 新增按需启动（`start = "lazy"`）](2026-09-22-mcp-lazy-start-and-npx-hint-fix.md)
 - [2026-09-22 开发环境与日常环境隔离（`~/.simpleagent-dev`、开发模式端口 8385），发布 v0.2.0](2026-09-22-dev-env-isolation-v0.2.0-release.md)
 - [2026-09-22 M6 完成：上下文工程（预算、清理旧工具结果、摘要压缩、`/compact`、超长兜底）](2026-09-22-m6-context-engineering.md)
