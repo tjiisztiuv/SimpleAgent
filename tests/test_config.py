@@ -2,13 +2,16 @@ from pathlib import Path
 
 import pytest
 
+from simpleagent import config as config_module
 from simpleagent.cli import main
 from simpleagent.config import (
     Config,
     ConfigError,
     Profile,
     config_path,
+    dev_checkout,
     example_config,
+    home_dir,
     init_config,
     load_config,
     read_env_file,
@@ -110,6 +113,80 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]):
     assert exit_info.value.code == 0
     name, _, number = capsys.readouterr().out.strip().partition(" ")
     assert name == "simpleagent" and number[0].isdigit()
+
+
+def _module_file(root: Path) -> Path:
+    """在 root 下摆出 src/simpleagent/config.py 的位置，返回这个文件路径。"""
+    path = root / "src" / "simpleagent" / "config.py"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    return path
+
+
+def test_dev_checkout_detects_source_repo(tmp_path: Path):
+    (tmp_path / "pyproject.toml").touch()
+    (tmp_path / ".git").mkdir()
+    assert dev_checkout(_module_file(tmp_path)) == tmp_path.resolve()
+
+
+def test_dev_checkout_detects_worktree(tmp_path: Path):
+    """git worktree 里 .git 是一个指向主仓库的文件，不是目录。"""
+    (tmp_path / "pyproject.toml").touch()
+    (tmp_path / ".git").write_text("gitdir: /somewhere/.git/worktrees/x\n")
+    assert dev_checkout(_module_file(tmp_path)) == tmp_path.resolve()
+
+
+def test_dev_checkout_is_none_for_installed_snapshot(tmp_path: Path):
+    """装进 site-packages 的快照：往上两级是 lib/python3.x，没有 pyproject.toml 和 .git。"""
+    site = tmp_path / "lib" / "python3.12" / "site-packages" / "simpleagent" / "config.py"
+    site.parent.mkdir(parents=True)
+    site.touch()
+    assert dev_checkout(site) is None
+
+
+def test_dev_checkout_needs_both_markers(tmp_path: Path):
+    (tmp_path / "pyproject.toml").touch()  # 只有 pyproject、没有 .git：比如解压出来的源码包
+    assert dev_checkout(_module_file(tmp_path)) is None
+
+
+def test_home_dir_is_separate_in_dev_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("SIMPLEAGENT_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    monkeypatch.setattr(config_module, "dev_checkout", lambda: tmp_path / "repo")
+    assert home_dir() == tmp_path / ".simpleagent-dev"
+
+    monkeypatch.setattr(config_module, "dev_checkout", lambda: None)
+    assert home_dir() == tmp_path / ".simpleagent"
+
+
+def test_home_dir_env_wins_over_dev_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """开发时想用日常数据，显式设 SIMPLEAGENT_HOME 就行；测试的 sa_home 也靠这个。"""
+    monkeypatch.setenv("SIMPLEAGENT_HOME", str(tmp_path / "chosen"))
+    monkeypatch.setattr(config_module, "dev_checkout", lambda: tmp_path / "repo")
+    assert home_dir() == tmp_path / "chosen"
+
+
+def test_this_repo_runs_in_dev_mode():
+    """测试就是从源码仓库跑的，应当认出来；认不出来的话开发时会写进日常数据目录。"""
+    assert dev_checkout() == Path(__file__).resolve().parents[1]
+
+
+def test_cli_version_marks_dev_mode(
+    sa_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    import simpleagent.cli as cli
+
+    monkeypatch.setattr(cli, "dev_checkout", lambda: Path("/repo"))
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    out = capsys.readouterr().out
+    assert "开发模式" in out and str(sa_home) in out
+
+    monkeypatch.setattr(cli, "dev_checkout", lambda: None)
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert "开发模式" not in capsys.readouterr().out
 
 
 def test_api_key_env_names_collects_all_profiles():

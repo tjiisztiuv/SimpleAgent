@@ -1,6 +1,7 @@
 """配置加载：~/.simpleagent/config.toml → pydantic 模型。
 
-数据目录可用环境变量 SIMPLEAGENT_HOME 覆盖（测试时指向临时目录）。
+数据目录可用环境变量 SIMPLEAGENT_HOME 覆盖（测试时指向临时目录）；从源码仓库跑时默认
+~/.simpleagent-dev，跟日常安装的 sa 分开。
 API key 不写进配置文件，只记录环境变量名；值从环境变量或 <home>/.env 读取。
 """
 
@@ -33,8 +34,26 @@ class ConfigError(Exception):
     pass
 
 
+def dev_checkout(module_file: str | Path = __file__) -> Path | None:
+    """从源码仓库跑（`uv run sa` / editable 安装）时返回仓库根目录；装成快照时返回 None。
+
+    判据：<仓库>/src/simpleagent/config.py 往上两级有 pyproject.toml 和 .git（worktree 里
+    .git 是文件）。装进 site-packages 的快照往上两级是 lib/python3.x，两样都没有。
+    """
+    root = Path(module_file).resolve().parents[2]
+    if (root / "pyproject.toml").is_file() and (root / ".git").exists():
+        return root
+    return None
+
+
 def home_dir() -> Path:
-    return Path(os.environ.get("SIMPLEAGENT_HOME") or Path.home() / ".simpleagent").expanduser()
+    """数据目录：SIMPLEAGENT_HOME > 开发模式的 ~/.simpleagent-dev > ~/.simpleagent。
+
+    开发时和日常用的 sa 装在同一台机器上，默认分开放，免得测试数据混进日常数据。
+    """
+    if env := os.environ.get("SIMPLEAGENT_HOME"):
+        return Path(env).expanduser()
+    return Path.home() / (".simpleagent-dev" if dev_checkout() else ".simpleagent")
 
 
 def read_env_file(path: Path | None = None) -> dict[str, str]:

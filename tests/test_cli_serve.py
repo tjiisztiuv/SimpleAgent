@@ -69,3 +69,33 @@ def test_serve_releases_port_on_exit(config, sa_home, monkeypatch):
 
     assert started, "serve 没有真的起来"
     assert _port_is_free(started[0]), "退出后端口没释放"
+
+
+def test_serve_default_port_differs_in_dev_mode(config, sa_home, monkeypatch, capsys):
+    """开发版和日常版的 sa serve 默认端口错开，两个能同时开。"""
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    ports: list[int] = []
+    real_make_server = app_module.make_server
+
+    def record_port(cfg, host="127.0.0.1", port=cli.SERVE_PORT):
+        ports.append(port)
+        httpd = real_make_server(cfg, host=host, port=0)
+
+        def interrupt() -> None:
+            raise KeyboardInterrupt
+
+        httpd.serve_forever = interrupt  # type: ignore[method-assign]
+        return httpd
+
+    monkeypatch.setattr(app_module, "make_server", record_port)
+
+    monkeypatch.setattr(cli, "dev_checkout", lambda: None)
+    assert cli.main(["serve"]) == 0
+    assert "开发模式" not in capsys.readouterr().out
+
+    monkeypatch.setattr(cli, "dev_checkout", lambda: sa_home)
+    assert cli.main(["serve"]) == 0
+    out = capsys.readouterr().out
+    assert "开发模式" in out and str(sa_home) in out
+
+    assert ports == [cli.SERVE_PORT, cli.DEV_SERVE_PORT]

@@ -249,7 +249,9 @@ StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Futur
 
 ### 数据目录
 
-`~/.simpleagent/`（可用 `SIMPLEAGENT_HOME` 覆盖）：
+`~/.simpleagent/`（可用 `SIMPLEAGENT_HOME` 覆盖）。从源码仓库跑（`config.dev_checkout()` 认出
+`pyproject.toml` + `.git`）时默认换成 `~/.simpleagent-dev/`，`sa serve` 默认端口也从 8384 换成 8385，
+这样同一台机器上开发用的 `uv run sa` 和日常装的 `sa` 互不干扰。优先级：`SIMPLEAGENT_HOME` > 开发模式 > 默认。
 
 | 路径 | 用途 | 引入 |
 |---|---|---|

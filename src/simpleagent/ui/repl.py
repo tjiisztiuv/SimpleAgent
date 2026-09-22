@@ -25,6 +25,7 @@ from simpleagent.config import (
     Config,
     ConfigError,
     Profile,
+    dev_checkout,
     home_dir,
 )
 from simpleagent.events import (
@@ -286,6 +287,8 @@ class Repl:
     def run(self) -> int:
         llm = self.agent.llm
         self.print(f"SimpleAgent · {llm.name}（{llm.profile.model}）", BOLD)
+        if dev_checkout():
+            self.print(f"开发模式：数据目录 {home_dir()}", DIM)
         if self.resumed:
             self.print(
                 f"继续会话 {self.session.id}（已恢复 {len(self.session.messages)} 条历史）", DIM

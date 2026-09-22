@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-22 开发环境与日常环境隔离（`~/.simpleagent-dev`、开发模式端口 8385），发布 v0.2.0](2026-09-22-dev-env-isolation-v0.2.0-release.md)
 - [2026-09-22 M6 完成：上下文工程（预算、清理旧工具结果、摘要压缩、`/compact`、超长兜底）](2026-09-22-m6-context-engineering.md)
 - [2026-09-21 M5 完成：手写 MCP 客户端，REPL / `sa run` / `sa serve` 都能接 MCP server](2026-09-21-m5-mcp-client.md)
 - [2026-09-21 M4 第 1 步：定时任务定义与时间表（schedules.toml + `sa schedule list`）](2026-09-21-m4-schedules-definition.md)

@@ -7,7 +7,7 @@ agent loop、工具调用、权限、上下文都从零手写，只依赖 OpenAI
 （投资、健康、旅游各一个目录，尽量不让项目绑死在某一家 agent 上），二是随手在网页上聊。
 所以这个项目要做的，是把那些散在各目录里的 AI 任务管起来：派任务、看状态、收例行任务的结果。
 
-当前版本 **0.1**，能力见下面的「能做什么」，路线图见 [ROADMAP](docs/ROADMAP.md)。
+当前版本 **0.2**，能力见下面的「能做什么」，路线图见 [ROADMAP](docs/ROADMAP.md)。
 
 ## 能做什么
 
@@ -26,15 +26,17 @@ agent loop、工具调用、权限、上下文都从零手写，只依赖 OpenAI
 
 ## 安装
 
-用 [uv](https://docs.astral.sh/uv/) 装成全局命令，之后在任意目录都能直接敲 `sa`（本机没有 Python 3.12 时 uv 会自动下载）：
+用 [uv](https://docs.astral.sh/uv/) 从 GitHub 装成全局命令，之后在任意目录都能直接敲 `sa`（本机没有 Python 3.12 时 uv 会自动下载）：
 
 ```bash
-uv tool install --editable .     # 在仓库根目录执行；editable：改完代码立刻生效，不用重装
+uv tool install "git+https://github.com/tjiisztiuv/SimpleAgent.git@main"
 sa --version                     # 确认装好了
 ```
 
-- 不加 `--editable` 是装一份当前代码的快照，改代码后要 `uv tool install --reinstall .` 才会更新
-- 在别的电脑上直接从 GitHub 装：`uv tool install git+https://github.com/tjiisztiuv/SimpleAgent.git`
+- 装的是 `main` 分支的一份快照，本地改代码不影响它；要更新就加 `--reinstall` 再执行一次
+- 想固定在某个版本就把 `@main` 换成 tag，比如 `@v0.2.0`
+- 不建议在本机开发目录里 `uv tool install --editable .`：那样日常用的 `sa` 就是正在改的代码，
+  见下面「开发」一节的隔离方式
 - 卸载：`uv tool uninstall simpleagent`（`~/.simpleagent/` 里的配置和会话不会删）
 - 命令装在 `~/.local/bin/`；不在 PATH 里的话执行一次 `uv tool update-shell`
 
@@ -42,7 +44,7 @@ sa --version                     # 确认装好了
 平时 `~/.local/bin` 排在 PATH 前面没问题；但 launchd、cron 这类 PATH 很短的环境会找到系统那个，
 这时写绝对路径 `~/.local/bin/sa`，或者用 `simple_agent`。
 
-不想装也可以：在仓库目录下 `uv sync` 后用 `uv run sa` 代替下面所有的 `sa`。
+不想装也可以：在仓库目录下 `uv sync` 后用 `uv run sa` 代替下面所有的 `sa`（这时是开发模式，数据目录是 `~/.simpleagent-dev/`）。
 
 ## 第一次使用
 
@@ -173,7 +175,7 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
 | `[profiles.*]` | 各家模型：`base_url`、`api_key_env`、`model`、`context_window`，以及各家私有参数 |
 | `[mcp_servers.*]` | MCP server：`command`、`args`、`env_vars`，以及工具过滤、权限覆盖、超时 |
 
-数据都在 `~/.simpleagent/` 下（可以用环境变量 `SIMPLEAGENT_HOME` 换个位置）：
+数据都在 `~/.simpleagent/` 下（可以用环境变量 `SIMPLEAGENT_HOME` 换个位置；在源码仓库里 `uv run sa` 用的是 `~/.simpleagent-dev/`，见「开发」）：
 
 ```
 ~/.simpleagent/
@@ -203,5 +205,25 @@ uv run pytest        # 测试（不联网，用 FakeLLM）
 uv run ruff check    # lint
 uv run ruff format   # 格式化
 ```
+
+同一台机器上既开发又日常用时，两边是隔开的：
+
+| | 日常用 | 开发 |
+|---|---|---|
+| 命令 | `sa`（从 GitHub 装的快照） | 仓库里 `uv run sa` |
+| 代码 | 装的那个提交，本地改动不影响 | 工作区当前代码 |
+| 数据目录 | `~/.simpleagent/` | `~/.simpleagent-dev/` |
+| `sa serve` 默认端口 | 8384 | 8385，两个可以同时开 |
+
+从源码仓库跑（包文件往上两级有 `pyproject.toml` 和 `.git`，worktree 也算）就是开发模式，
+`sa --version`、REPL 和 `sa serve` 启动时都会标出来。开发目录第一次用要初始化，key 可以跟日常共用一份：
+
+```bash
+uv run sa init
+ln -s ~/.simpleagent/.env ~/.simpleagent-dev/.env
+```
+
+优先级是 `SIMPLEAGENT_HOME` > 开发模式 > `~/.simpleagent`。偶尔想拿开发代码读日常数据，
+就显式写 `SIMPLEAGENT_HOME=~/.simpleagent uv run sa`。
 
 协作约定（包括用 AI 改这个仓库时的规矩）见 [AGENTS.md](AGENTS.md)。

@@ -63,8 +63,12 @@ uv run ruff format   # 格式化（也会格式化 Markdown 里的 Python 代码
 
 改完代码至少跑一遍 `ruff format`、`ruff check` 和 `pytest`。
 
+用户本机同时装了日常用的 `sa`（GitHub `main` 的快照，数据在 `~/.simpleagent/`）。在仓库里 `uv run sa`
+是开发模式，数据目录自动换成 `~/.simpleagent-dev/`，`sa serve` 默认端口 8385（`config.dev_checkout()`）。
+手动试功能用 `uv run sa`，不要碰全局的 `sa` 和 `~/.simpleagent/`。
+
 ## 5. 安全约定
 
 - API key 只放在环境变量或 `~/.simpleagent/.env` 里，不要写进 `config.toml`、代码、trace 或日志，也不要在输出中打印 key。
 - 没有用户要求时，不要读取或修改 `~/.simpleagent/.env`。
-- 测试通过 `SIMPLEAGENT_HOME` 把数据目录指向临时目录（`tests/conftest.py` 里的 `sa_home` fixture），不要写入真实的 `~/.simpleagent`。
+- 测试通过 `SIMPLEAGENT_HOME` 把数据目录指向临时目录（`tests/conftest.py` 里的 `sa_home` fixture），不要写入真实的 `~/.simpleagent` 或 `~/.simpleagent-dev`。

@@ -11,13 +11,23 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from simpleagent.agent.session import SESSION_DIRNAME, Session, SessionStore
-from simpleagent.config import ConfigError, config_path, home_dir, init_config, load_config
+from simpleagent.config import (
+    ConfigError,
+    config_path,
+    dev_checkout,
+    home_dir,
+    init_config,
+    load_config,
+)
 from simpleagent.panel.store import LEVELS
 from simpleagent.scheduler import ScheduleError, init_schedules, load_schedules, schedules_path
 from simpleagent.ui.debug import DEBUG_LEVELS
 
 # --resume 不给值时的哨兵：argparse 用 const 填进来，好区分「没传」和「传了但没给 id」
 LATEST = "__latest__"
+# sa serve 默认端口；从源码仓库跑时换一个，开发版和日常版能同时开
+SERVE_PORT = 8384
+DEV_SERVE_PORT = 8385
 WEEKDAYS = "一二三四五六日"
 
 
@@ -31,6 +41,14 @@ def package_version() -> str:
         return version("simpleagent")
     except PackageNotFoundError:
         return "unknown"
+
+
+def version_text() -> str:
+    """`sa --version`：从源码仓库跑时标出仓库和数据目录，一眼分清是开发版还是日常版。"""
+    text = f"simpleagent {package_version()}"
+    if root := dev_checkout():
+        text += f"（开发模式：{root}，数据目录 {home_dir()}）"
+    return text
 
 
 def session_store() -> SessionStore:
@@ -174,10 +192,13 @@ def list_sessions(store: SessionStore, limit: int) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="sa", description="SimpleAgent：自用、可学习的本地 agent")
-    parser.add_argument(
-        "-V", "--version", action="version", version=f"simpleagent {package_version()}"
+    parser = argparse.ArgumentParser(
+        prog="sa",
+        description="SimpleAgent：自用、可学习的本地 agent",
+        # 不按终端宽度折行：--version 里带路径，折开了没法复制
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("-V", "--version", action="version", version=version_text())
     parser.add_argument(
         "--debug",
         nargs="?",
@@ -202,7 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     serve = commands.add_parser("serve", help="启动本地 API（HTTP + SSE），供桌面客户端连接")
     serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
-    serve.add_argument("--port", type=int, default=8384, help="监听端口（默认 8384）")
+    port = DEV_SERVE_PORT if dev_checkout() else SERVE_PORT
+    serve.add_argument("--port", type=int, default=port, help=f"监听端口（默认 {port}）")
     run = commands.add_parser("run", help="headless：执行一个任务后退出，不与人交互")
     run.add_argument("prompt", help="要做的任务")
     run.add_argument("--cwd", default=None, help="工作目录，默认当前目录")
@@ -280,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"SimpleAgent 本地 API 已启动：http://{args.host}:{args.port}")
             print(f"浏览器打开工作台：http://{args.host}:{args.port}/")
+            if dev_checkout():
+                print(f"开发模式：数据目录 {home_dir()}")
             print("按 Ctrl+C 停止。")
             try:
                 httpd.serve_forever()
