@@ -42,13 +42,15 @@
 
 ### Agent loop（M2，主体已实现，见 `agent/loop.py`）
 
-下面是设计草图；`context.build`（预算和压缩）到 M6 才加入，目前直接拼 system prompt + 历史。
+下面是设计草图。M6 没有单独做 `context.build`：请求还是 system prompt + 历史，预算、清理、压缩在每次请求前原地改 Session（见「上下文管理」）。
 
 ```python
 async def run(self, session, user_input) -> AsyncIterator[Event]:
     session.append({"role": "user", "content": user_input})
     for step in range(self.max_steps):
-        messages = self.context.build(session)  # system prompt + 历史（超预算时压缩）
+        async for ev in self.reduce_context(session):  # M6：超预算时先压缩 / 清理，原地改 Session
+            yield ev  # ContextEdited
+        messages = [system, *session.messages]
         async for ev in self.llm.stream(messages, tools=self.tools.schemas()):
             yield ev  # TextDelta / ReasoningDelta / MessageDone
         msg = ev.message  # 流结束时拼好的 assistant 消息
@@ -145,12 +147,14 @@ tool_call → Registry.judge() → Policy.decide() ─┬─ ALLOW → 执行
 
 ```
 {"op":"meta", ...}   {"op":"append","message":{...}}   {"op":"truncate","n":5}   {"op":"stats",...}
+{"op":"replace","changes":[[3,{...}]]}   M6：原地替换几条消息（清理旧工具结果），一条记录里全部改完
+{"op":"compact","cut":12,"messages":[...]}   M6：前 12 条换成摘要；被压掉的原文还在前面的 append 行里
 ```
 
 需要 `truncate` 是因为 Ctrl+C 之后 `Agent._repair` 要**撤回**已经写进历史的半条对话。
 append-only 的文件表达「撤销」就得靠这种墓碑行；全量重写的话，进程崩在写一半时会丢掉整份历史。
 
-消息历史只能通过 `Session.add` / `add_many` / `truncate` / `record_stats` 改，它们负责同步写盘。
+消息历史只能通过 `Session.add` / `add_many` / `truncate` / `replace` / `compact` / `record_stats` 改，它们负责同步写盘。
 写盘失败静默忽略（持久化是加分项，磁盘满了不该让对话中断）。
 
 ### MCP 客户端（M5，`mcp/`）
@@ -172,6 +176,58 @@ StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Futur
 - **子进程环境是白名单**（`HOME` / `PATH` / `LANG` / 代理），密钥用 `env_vars` 只写变量名。
 - server 的 `instructions` 截到 2000 字、标明是第三方内容后，追加到 system prompt 末尾。
 - 详细的取舍和实测记录见 [notes/M5-mcp-client.md](notes/M5-mcp-client.md)。
+
+### 上下文管理（M6，`agent/context.py`）
+
+**预算**：下一次请求会发多少 token = 上次请求的实际用量 + 之后新增消息的估算。
+
+- `usage.prompt_tokens` 精确覆盖上次发出的 system + 工具 + `messages[:n]`，loop 把它记成
+  `Session.context_anchor`（只在内存里）。估算前先过 `prepare_messages`，按实际发出去的样子算
+- 新增部分按字符估：ASCII 3 个字符一个 token、非 ASCII 一个字一个、每条消息加 4，往大了取。
+  没用 tiktoken：多一个依赖，而且各家 tokenizer 不一样（实测 DeepSeek 上这套规则高估 20%～30%）
+- **校准系数** = 实际用量 ÷ 同一段的字符估算，每次请求更新（`Session.context_calibration`，限制在 0.5～2）。
+  清理、压缩、`truncate` 删进覆盖范围会作废实际用量，但不作废系数：之后全量估算再乘系数，
+  不然清理完紧接着判断要不要压缩，用的是偏高 25% 的数，可能白压一次
+- 输入上限 = `context_window` − 给输出留的余量（`max_tokens`，没配就取 16k 和窗口 1/4 中较小的）
+- REPL 的 `/context` 显示总量、构成和「上次实际 vs 同一段按字符估」的误差
+
+**三级策略**，每次请求前都查（不只在每轮开始时，daemon 一轮几十步也会撑爆）：
+
+1. **写入时截断**（M2，`ToolRegistry.trim`）：单个工具结果超过 3 万字符 / 500 行只留开头，完整内容落盘
+2. **清理旧工具结果**（`Agent._clear_tool_results`，占到 `[context].clear_at`，默认 60%）：较早的 tool 结果
+   换成 `[已清理] …完整内容存在 <路径>，需要时用 read_file 读取`，只动 content，配对不断。不清最近
+   `keep_tool_results` 个（默认 3）、模型还没看过的、已清过的、短于 300 字符的、以及模型把清理文件读回来的。
+   原文落到 `tool_outputs/cleared-<内容摘要>.txt`，文件名只由内容决定，占位符一字不差
+3. **摘要压缩**（`Agent.compact`，按清完的样子算还占到 `compact_at`，默认 80%）：切点只落在 user 消息或
+   紧跟工具结果的 assistant 消息上，tool_calls 和结果要么一起压、要么一起留；保留最近约 1/4 的原文。
+   摘要请求 = `[system, *messages[:切点], user(压缩指令)]`，tools 照带；压缩后是
+   `user([对话摘要] …)`（保留部分以 user 开头时再加一条固定的 assistant 回复），然后是保留的原文
+
+**和前缀缓存的关系**（这一节最重要的取舍）：
+
+- system prompt 和工具列表整个会话不变（有回归测试守着）
+- 清理改的是历史中间，缓存从第一条被改的消息起全部失效：过了阈值就一次清完，能省下的不到输入上限的 5% 就不清
+- 摘要请求的 `messages[:切点]` 要和上一次请求**一字不差**才吃得到缓存：
+  - 要压缩就**先压缩再清理**：先清的话前缀被改掉，被清的结果反正也要压进摘要
+  - `reasoning_echo = "current_turn"` 时，压缩指令默认会被当成新的一轮、去掉本轮的思考内容。所以
+    `stream(continue_turn=...)` 按上一次请求的回传起点来定：它的最后一条 user 在切点之前就接着回传，
+    在切点之后（压的全是更早的轮次）就全去掉。实测 DeepSeek 摘要请求的缓存命中从 30%～58% 到 95%～97%
+- 压缩之后第一次请求除了 system 和工具定义，缓存全部失效——这是压缩排在最后的原因
+
+**其余入口**：
+
+- REPL 的 `/compact [重点]`：切在最后一条 user 上（`last_turn_cut`），完整保留最后一轮
+- 服务端说上下文超长（`is_context_overflow`：状态码 400 / 413 + 各家的说法）且还没有任何输出：强制压缩一次、
+  只留最后一步（估算已经不可信），重试这一步；每步只兜底一次。Ollama 超过 `num_ctx` 是悄悄截断而不是报错，
+  `context_window` 要配准
+- 失败（API 报错、摘要为空）产出带 `error` 的 `ContextEdited`，历史不动，本轮不再重试
+- 所有改动走 `Session.replace` / `compact`（JSONL 各一条记录），并产出 `ContextEdited` 事件：
+  REPL / `sa run` 显示一行提示，工作台转成 `context_edited` 帧
+- **工作台的两份历史**：`sessions/<sid>.jsonl` 按事件镜像，给界面显示实际发生过什么；`sessions/model/<sid>.jsonl`
+  是 `SessionStore` 的操作记录，模型看到的历史，清理、压缩、中断修复都随手落盘。老会话第一次用到时迁移过来，
+  顺手补上悬空的 tool_call（`fill_missing_results`）
+
+详细的取舍和实测记录见 [notes/M6-context-engineering.md](notes/M6-context-engineering.md)。
 
 ### LLM Client 与配置（M1，已实现）
 
@@ -248,7 +304,7 @@ src/simpleagent/
   config.py               ✅ TOML + 环境变量 → pydantic 配置模型（M5 起含 [mcp_servers.<名字>]）
   config.example.toml     ✅ sa init 使用的配置模板
   events.py               ✅ 事件类型（TextDelta / ReasoningDelta / ApiRequest / ApiResponse /
-                          ✅ MessageDone / ToolCallStart / ToolResult / MaxStepsReached）
+                          ✅ MessageDone / ToolCallStart / ToolResult / ContextEdited / MaxStepsReached）
   trace.py                ✅ 请求/响应全量落盘
   permissions.py          ✅ 权限：Decision / Scope / Policy（含 bash 危险命令识别）、审批器协议
   llm/client.py           ✅ 流式调用、chunk 拼接、思考内容、quirks
@@ -256,7 +312,8 @@ src/simpleagent/
   agent/prompt.py         ✅ system prompt 组装（后续加 AGENTS.md、记忆、skills 列表）
   agent/loop.py           ✅ Agent loop：工具调用循环、max_steps、中断后修复历史
   agent/session.py        ✅ 会话状态：消息历史、用量、JSONL 持久化与恢复
-  agent/context.py           token 预算、结果清理、压缩（M6）
+  agent/context.py        ✅ token 预算与校准、清理旧工具结果、摘要压缩的切点与指令、
+                          ✅ 手动压缩的切点、上下文超长报错识别（M6）
   tools/                  ✅ Tool 抽象、注册表、7 个内置工具
   tools/base.py           ✅ ToolContext（cwd / output_dir / hidden_env / save_output）、ToolError、
                           ✅ Tool（readonly / truncate_output / permission / scope /
@@ -278,7 +335,7 @@ src/simpleagent/
   mcp/manager.py          ✅ McpManager：并行启动、失败隔离、崩溃后下次调用时重启（5 分钟内最多 3 次）、
                           ✅ instructions 进 system prompt；REPL / sa run / sa serve 共用（M5）
   skills.py                  SKILL.md 发现与按需加载（M7）
-  ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp）
+  ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp，M6 起有 /context、/compact）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
   ui/approve.py           ✅ ConsoleApprover：终端 y / a / 其他键拒绝
   ui/debug.py             ✅ debug 输出：API 调用与工具调用的过程，走 stderr（off / on / verbose / full）

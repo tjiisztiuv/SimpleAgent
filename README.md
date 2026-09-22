@@ -69,7 +69,7 @@ sa sessions              # 列出已保存的会话
 ```
 
 REPL 里的命令：`/model [name]` 切模型、`/tools` 列工具、`/mcp` 看 MCP server 状态、`/usage` 看用量、
-`/clear` 清空历史、`/help`、`/exit`。
+`/context` 看上下文占用和构成、`/compact [重点]` 把早期对话压成摘要、`/clear` 清空历史、`/help`、`/exit`。
 要输入多行，单独一行敲 `"""` 开始，再敲一次 `"""` 结束；Ctrl+C 中断当前回复，Ctrl+D 退出。
 
 模型自己决定调哪个工具，终端里用灰色显示调用和结果预览。一轮对话最多请求模型 `max_steps` 次（默认 20），
@@ -168,6 +168,7 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
 | `system_prompt` | 覆盖默认的 system prompt |
 | `[trace]` | 是否把每次请求响应落盘，调试协议时用 |
 | `[tool_output]` | 工具结果回给模型的字符和行数上限 |
+| `[context]` | 上下文快满时怎么腾地方：占到多少比例清理旧工具结果、保留最近几个，再满就把早期对话压成摘要 |
 | `[panel]` | 控制面板的消息多久自动归档 |
 | `[profiles.*]` | 各家模型：`base_url`、`api_key_env`、`model`、`context_window`，以及各家私有参数 |
 | `[mcp_servers.*]` | MCP server：`command`、`args`、`env_vars`，以及工具过滤、权限覆盖、超时 |

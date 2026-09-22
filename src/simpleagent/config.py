@@ -133,6 +133,19 @@ class ToolOutputConfig(BaseModel):
 TOOL_OUTPUT_DIRNAME = "tool_outputs"
 
 
+class ContextConfig(BaseModel):
+    """上下文管理：快满的时候怎么腾地方。比例都相对「输入上限」= 窗口 − 给输出留的余量。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 占到这个比例就清理旧工具结果（换成占位符，原文落盘）；0 = 关闭
+    clear_at: float = Field(0.6, ge=0, le=1)
+    # 最近几个工具结果保留原样
+    keep_tool_results: int = Field(3, ge=1)
+    # 清理之后还占到这个比例，就调 LLM 把早期对话压成摘要（保留最近约 1/4 的原文）；0 = 关闭
+    compact_at: float = Field(0.8, ge=0, le=1)
+
+
 class DebugConfig(BaseModel):
     """交互时的 debug 输出：显示 API 调用和工具调用的详细过程。
 
@@ -233,6 +246,7 @@ class Config(BaseModel):
     # 一轮对话里最多请求模型几次，防止模型无限调用工具
     max_steps: int = Field(20, ge=1)
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)

@@ -5,6 +5,8 @@
     {"op": "meta", "id": "...", "profile": "...", "cwd": "...", "created_at": "..."}
     {"op": "append", "message": {...}}
     {"op": "truncate", "n": 5}                     截断到前 5 条
+    {"op": "replace", "changes": [[3, {...}]]}     原地替换第 3 条（清理旧工具结果，M6）
+    {"op": "compact", "cut": 12, "messages": [...]} 前 12 条换成这几条（摘要压缩，M6）
     {"op": "stats", "requests": 3, "usage": {...}}
 
 为什么不直接一行一条消息：Agent 被 Ctrl+C 打断时要「撤回」写进去的半条对话
@@ -24,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from simpleagent.agent.context import Calibration, ContextAnchor
 from simpleagent.events import Usage
 
 SESSION_DIRNAME = "sessions"  # 相对于数据目录：<home>/sessions/<id>.jsonl
@@ -64,7 +67,7 @@ class SessionInfo:
 class Session:
     """一次对话的全部状态。
 
-    消息历史只允许通过 add / truncate 改动：这两个方法负责同步写盘，
+    消息历史只允许通过 add / truncate / replace / compact 改动：这几个方法负责同步写盘，
     直接 `session.messages.append(...)` 会漏掉持久化，恢复时就会丢内容。
     """
 
@@ -72,6 +75,10 @@ class Session:
     messages: list[dict[str, Any]] = field(default_factory=list)  # 不含 system prompt
     usage: Usage = field(default_factory=Usage)
     requests: int = 0
+    # 上次请求的实际输入用量，上下文预算拿它当基准。不落盘：恢复会话后请求一次就有了
+    context_anchor: ContextAnchor | None = field(default=None, repr=False, compare=False)
+    # 实际用量 ÷ 字符估算。历史改动只作废上面的基准、不作废它：没有基准时拿它修正估算
+    context_calibration: Calibration | None = field(default=None, repr=False, compare=False)
     _store: SessionStore | None = field(default=None, repr=False, compare=False)
 
     def attach(self, store: SessionStore | None) -> None:
@@ -95,6 +102,38 @@ class Session:
         if len(self.messages) > n:
             del self.messages[n:]
             self._log({"op": "truncate", "n": n})
+        # 删到了上次请求覆盖的范围之内：那个实际用量不再对应现在的历史
+        if self.context_anchor is not None and n < self.context_anchor.messages:
+            self.context_anchor = None
+
+    def replace(self, changes: dict[int, dict[str, Any]]) -> None:
+        """原地替换几条消息，条数不变（清理旧工具结果用）。
+
+        所有改动写成一条记录：要么全部生效，要么都没发生。记录里存替换后的完整消息，
+        而不是「第几条要清」——占位符里有落盘路径，重放时算不出来。
+        """
+        if not changes:
+            return
+        for index, message in changes.items():
+            self.messages[index] = message
+        self._log({"op": "replace", "changes": [[i, changes[i]] for i in sorted(changes)]})
+        # 改到了上次请求覆盖的范围之内：那个实际用量不再对应现在的历史
+        if self.context_anchor is not None and min(changes) < self.context_anchor.messages:
+            self.context_anchor = None
+
+    def compact(self, cut: int, head: list[dict[str, Any]]) -> None:
+        """前 cut 条消息换成 head（摘要）。一条记录完成替换，被压掉的原文还在前面的 append 行里。"""
+        self.messages[:cut] = head
+        self._log({"op": "compact", "cut": cut, "messages": head})
+        self.context_anchor = None  # 整段前缀都变了
+
+    def mark_sent(self, prompt_tokens: int, messages: int, model: str, estimate: int) -> None:
+        """记下上次请求的实际输入用量：它精确覆盖了 system + 工具 + messages[:messages]。
+
+        estimate 是同一段请求发出前按字符估的值，顺带更新校准系数。
+        """
+        self.context_anchor = ContextAnchor(prompt_tokens, messages, model, estimate)
+        self.context_calibration = Calibration.of(self.context_anchor) or self.context_calibration
 
     def record_stats(self, usage: Usage | None = None, requests: int = 0) -> None:
         """累加用量。usage 为 None 时只累加请求次数。"""
@@ -176,6 +215,12 @@ class SessionStore:
             elif op == "truncate":
                 n = int(record.get("n") or 0)
                 del session.messages[n:]
+            elif op == "replace":
+                for index, message in record.get("changes") or []:
+                    if 0 <= index < len(session.messages):
+                        session.messages[index] = message
+            elif op == "compact":
+                session.messages[: int(record.get("cut") or 0)] = record.get("messages") or []
             elif op == "stats":
                 session.requests = int(record.get("requests") or session.requests)
                 if "usage" in record:

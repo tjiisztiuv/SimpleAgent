@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-22 M6 完成：上下文工程（预算、清理旧工具结果、摘要压缩、`/compact`、超长兜底）](2026-09-22-m6-context-engineering.md)
 - [2026-09-21 M5 完成：手写 MCP 客户端，REPL / `sa run` / `sa serve` 都能接 MCP server](2026-09-21-m5-mcp-client.md)
 - [2026-09-21 M4 第 1 步：定时任务定义与时间表（schedules.toml + `sa schedule list`）](2026-09-21-m4-schedules-definition.md)
 - [2026-09-20 debug 模式加第四档 full：看清发给 LLM 的具体输入和模型返回了什么](2026-09-20-debug-mode-full-level.md)

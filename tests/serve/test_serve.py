@@ -415,3 +415,19 @@ def test_panel_summary_drops_stale_recent(config, sa_home):
     store._write_meta(space.id, meta)
 
     assert recent_ids() == []
+
+
+def test_context_edited_frame():
+    from simpleagent.events import ContextEdited, Usage
+    from simpleagent.serve.frames import event_to_frame
+
+    frame = event_to_frame(ContextEdited("clear", 4000, 1000, 5000, 3), "s1")
+    assert frame.type == "context_edited"
+    assert frame.payload["count"] == 3
+    assert frame.payload["summary"].startswith("清理了 3 个旧工具结果")
+    assert frame.payload["usage"] is None and frame.payload["error"] is None
+
+    usage = Usage(prompt_tokens=4000, completion_tokens=20, cached_tokens=3900)
+    frame = event_to_frame(ContextEdited("compact", 4500, 1500, 5000, 8, usage=usage), "s1")
+    assert frame.payload["kind"] == "compact"
+    assert frame.payload["usage"]["cached_tokens"] == 3900

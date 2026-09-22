@@ -44,6 +44,11 @@ class Harness:
     def output(self) -> str:
         return self.out.getvalue()
 
+    def reset(self) -> None:
+        """清空已有输出，只看之后打出来的。"""
+        self.out.seek(0)
+        self.out.truncate()
+
 
 async def test_chat_turn_records_history_and_prints_stats(config: Config):
     h = Harness(
@@ -168,6 +173,132 @@ async def test_commands(config: Config):
     assert await h.repl.handle("/whatever")
     assert "未知命令 /whatever" in h.output
     assert await h.repl.handle("/exit") is False
+
+
+async def test_clear_is_persisted(config: Config, sa_home):
+    """/clear 要写进 JSONL：直接清列表的话，--resume 之后清掉的历史又回来了。"""
+    store = SessionStore(sa_home / "sessions")
+    repl = Repl(
+        config,
+        llm_factory=lambda n, p: FakeLLM(["ok"], name=n, profile=p),
+        out=io.StringIO(),
+        store=store,
+    )
+    await repl.handle("hi")
+    assert len(store.load(repl.session.id).messages) == 2
+    await repl.handle("/clear")
+    assert store.load(repl.session.id).messages == []
+
+
+async def test_context_command(config: Config):
+    h = Harness(
+        config,
+        {
+            "a": [{"content": "你好", "usage": {"prompt_tokens": 40, "completion_tokens": 3}}],
+            "b": [],
+        },
+    )
+    await h.repl.handle("/context")
+    assert "还没有实际用量" in h.output  # 还没请求过：全部按字符估
+    assert "工具 7 个" in h.output
+
+    await h.repl.handle("hi")
+    h.reset()
+    await h.repl.handle("/context")
+    assert "/ 112,000 token" in h.output  # 128k 窗口留 16k 给输出
+    assert "40 来自上次请求的实际用量" in h.output
+    assert "校准：上次请求实际 40" in h.output
+
+    await h.repl.handle("/model b")  # 换了 tokenizer，上次的实际用量不能再用
+    h.reset()
+    await h.repl.handle("/context")
+    assert "还没有实际用量" in h.output
+
+
+def read_calls(n: int) -> list:
+    """n 次请求各读一次 big.txt（约 4000 字符），最后回答完成。"""
+    calls = [
+        {"tool_calls": [{"id": f"r{i}", "name": "read_file", "arguments": {"path": "big.txt"}}]}
+        for i in range(n)
+    ]
+    return [*calls, "完成"]
+
+
+async def test_context_edited_is_shown(config: Config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "big.txt").write_text(("x" * 99 + "\n") * 40)
+    config.profiles["a"].context_window = 6000  # 输入上限 5000，读 4 次就过 60%
+    config.profiles["a"].max_tokens = 1000
+    config.context.compact_at = 0  # 只看清理：压缩另有测试
+    h = Harness(config, {"a": read_calls(4)})
+    await h.repl.handle("读四遍")
+    assert "[清理了 1 个旧工具结果，上下文" in h.output
+
+
+async def test_compaction_is_shown(config: Config):
+    config.profiles["a"].context_window = 6000  # 输入上限 5000
+    config.profiles["a"].max_tokens = 1000
+    h = Harness(config, {"a": ["答" * 4500, "摘要：用户问过一个问题", "第二个回答"]})
+    await h.repl.handle("第一个问题")
+    await h.repl.handle("第二个问题")  # 一开口就超过 80%：先压缩，再回答
+    assert "[压缩了前 2 条消息：上下文" in h.output
+    assert "第二个回答" in h.output
+    assert h.repl.session.messages[0]["content"].startswith("[对话摘要]")
+
+
+async def test_compact_command(config: Config):
+    h = Harness(config, {"a": ["答1", "答2", "摘要：问过两个问题"]})
+    await h.repl.handle("/compact")
+    assert "没有可以压缩的内容" in h.output
+
+    await h.repl.handle("q1")
+    await h.repl.handle("q2")
+    h.reset()
+    await h.repl.handle("/compact 保留文件名")
+    assert "[压缩了前 2 条消息：上下文" in h.output
+    assert "保留文件名" in h.fakes["a"].requests[-1]["messages"][-1]["content"]  # 重点进了指令
+    messages = h.repl.session.messages
+    assert messages[0]["content"].startswith("[对话摘要]")
+    assert messages[2:] == [
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "答2"},
+    ]  # 只留最后一轮
+
+
+async def test_compact_command_keeps_whole_last_turn(config: Config, tmp_path, monkeypatch):
+    """最后一轮里调过工具：问题、工具调用、回答都要留下，不能只剩最后那条回答。"""
+    monkeypatch.chdir(tmp_path)
+    call = {"id": "c1", "name": "list_dir", "arguments": {}}
+    h = Harness(config, {"a": ["答1", {"tool_calls": [call]}, "答2", "摘要"]})
+    await h.repl.handle("q1")
+    await h.repl.handle("q2")
+    await h.repl.handle("/compact")
+    roles = [m["role"] for m in h.repl.session.messages]
+    assert roles == ["user", "assistant", "user", "assistant", "tool", "assistant"]
+    assert h.repl.session.messages[2] == {"role": "user", "content": "q2"}
+
+
+async def test_context_after_compact_uses_calibration(config: Config):
+    usage = {"prompt_tokens": 30, "completion_tokens": 3}
+    h = Harness(
+        config,
+        {"a": [{"content": "答1", "usage": usage}, {"content": "答2", "usage": usage}, "摘要"]},
+    )
+    await h.repl.handle("q1")
+    await h.repl.handle("q2")
+    await h.repl.handle("/compact")
+    h.reset()
+    await h.repl.handle("/context")
+    assert "上次的实际用量已作废（清理 / 压缩过），按字符估再乘校准系数" in h.output
+
+
+async def test_compact_command_failure(config: Config):
+    h = Harness(config, {"a": ["答1", "答2", RuntimeError("连不上")]})
+    await h.repl.handle("q1")
+    await h.repl.handle("q2")
+    await h.repl.handle("/compact")
+    assert "压缩失败：RuntimeError: 连不上" in h.output
+    assert len(h.repl.session.messages) == 4  # 历史没动
 
 
 def test_run_loop_with_multiline_input(config: Config):

@@ -217,3 +217,22 @@ async def test_headless_failed_mcp_server_only_warns(config: Config, tmp_path: P
     assert await frontend.run("做事") == 0
     assert "MCP：ghost ✗ 找不到命令" in err.getvalue()
     assert "  连接 MCP server ghost 失败：找不到命令" in err.getvalue()
+
+
+def read_calls(n: int) -> list:
+    """n 次请求各读一次 big.txt（约 4000 字符），最后回答完成。"""
+    calls = [
+        {"tool_calls": [{"id": f"r{i}", "name": "read_file", "arguments": {"path": "big.txt"}}]}
+        for i in range(n)
+    ]
+    return [*calls, "完成"]
+
+
+async def test_headless_shows_context_edited(config: Config, tmp_path: Path):
+    (tmp_path / "big.txt").write_text(("x" * 99 + "\n") * 40)
+    config.profiles["a"].context_window = 6000  # 输入上限 5000，读 4 次就过 60%
+    config.profiles["a"].max_tokens = 1000
+    config.context.compact_at = 0  # 只看清理：压缩另有测试
+    frontend, _ = make_headless(tmp_path, config, read_calls(4))
+    assert await frontend.run("读四遍") == 0
+    assert "[清理了 1 个旧工具结果，上下文" in frontend.out.getvalue()

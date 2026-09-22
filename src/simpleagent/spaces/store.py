@@ -3,8 +3,10 @@
 落盘布局（在 <SIMPLEAGENT_HOME>/spaces/ 下）：
     <space-id>/space.toml          空间定义（唯一真值）
     <space-id>/tmp/                没有固定 cwd 的空间的工作目录
-    <space-id>/sessions/<sid>.jsonl   消息流，只追加
+    <space-id>/sessions/<sid>.jsonl   消息流，只追加：界面显示的是实际发生过什么
     <space-id>/sessions/<sid>.meta.json  会话元信息（标题/状态/验证），可变
+    <space-id>/sessions/model/<sid>.jsonl  模型看到的历史（M6）：agent/session.py 的操作记录，
+                                        清理旧工具结果、摘要压缩、中断修复都在这里
 
 不用额外依赖：TOML 用标准库 tomllib 读、自己拼字符串写；JSON 用标准库 json。
 """
@@ -322,6 +324,36 @@ class SpaceStore:
             }
         )
         return Session(id=session_id, messages=messages, usage=usage, requests=len(messages))
+
+    def model_sessions(self, space_id: str):
+        """模型看到的历史存在 sessions/model/<sid>.jsonl，读写交给 SessionStore。"""
+        from simpleagent.agent.session import SessionStore
+
+        return SessionStore(self._sessions_dir(space_id) / "model")
+
+    def load_model_session(self, space_id: str, session_id: str):
+        """内置 agent 用的 Session：模型看到的历史。
+
+        和展示用的 jsonl 分开：展示那份是按事件镜像的，清理、压缩、中断修复都不产生消息事件，
+        从它重建历史的话，这些改动每次输入都会丢——压缩还得每轮重新调一次 LLM，中断后留下的
+        悬空 tool_call 会让下一次请求被拒。这份走 Session 的方法，改动随手落盘。
+
+        第一次用到时从展示用的 jsonl 迁移：顺手补上悬空的 tool_call，以前被中断弄坏的会话
+        也能接着用；用量从 meta 接过来，接着累计。
+        """
+        from simpleagent.agent.loop import fill_missing_results
+        from simpleagent.agent.session import Session
+
+        store = self.model_sessions(space_id)
+        session = store.load(session_id)
+        if session is not None:
+            return session
+        legacy = self.load_session(space_id, session_id)
+        space = self.get_space(space_id)
+        session = store.start(Session(session_id), profile=space.profile if space else "")
+        session.add_many(fill_missing_results(legacy.messages))
+        session.record_stats(legacy.usage)
+        return session
 
     def append_message(self, space_id: str, session_id: str, msg: dict) -> None:
         jsonl = self._session_jsonl(space_id, session_id)

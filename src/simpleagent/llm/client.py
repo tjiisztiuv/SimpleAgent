@@ -45,6 +45,8 @@ class LLM(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         step: int = 0,  # 本轮对话的第几次请求，只在 debug 输出里用来标号
+        # 最后一条 user 不算新的一轮（摘要压缩的指令），见 prepare_messages
+        continue_turn: bool = False,
     ) -> AsyncIterator[Event]: ...
 
     async def close(self) -> None: ...
@@ -109,9 +111,17 @@ class StreamAccumulator:
         return message
 
 
-def prepare_messages(messages: list[dict[str, Any]], quirks: Quirks) -> list[dict[str, Any]]:
-    """按 reasoning_echo 策略处理历史里的思考内容，返回新的列表（不修改会话历史）。"""
-    last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+def prepare_messages(
+    messages: list[dict[str, Any]], quirks: Quirks, continue_turn: bool = False
+) -> list[dict[str, Any]]:
+    """按 reasoning_echo 策略处理历史里的思考内容，返回新的列表（不修改会话历史）。
+
+    continue_turn：最后一条 user 消息不算新的一轮，思考内容按它之前那一轮回传。摘要压缩的
+    指令就是这样——它是本轮的延续，不是用户开启的新一轮。按新一轮算的话，本轮的思考内容
+    被去掉，前缀和上一次请求对不上，实测 DeepSeek 的缓存命中从 99% 掉到 58%。
+    """
+    scan = messages[:-1] if continue_turn else messages
+    last_user = max((i for i, m in enumerate(scan) if m.get("role") == "user"), default=-1)
     prepared = []
     for i, message in enumerate(messages):
         if REASONING_KEY not in message:
@@ -187,12 +197,15 @@ class LLMClient:
         return urljoin(self.profile.base_url.rstrip("/") + "/", "chat/completions")
 
     def build_request(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        continue_turn: bool = False,
     ) -> dict[str, Any]:
         profile, quirks = self.profile, self.profile.quirks
         request: dict[str, Any] = {
             "model": profile.model,
-            "messages": prepare_messages(messages, quirks),
+            "messages": prepare_messages(messages, quirks, continue_turn),
             "stream": True,
         }
         if quirks.stream_usage:
@@ -212,8 +225,9 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         step: int = 0,
+        continue_turn: bool = False,
     ) -> AsyncIterator[Event]:
-        request = self.build_request(messages, tools)
+        request = self.build_request(messages, tools, continue_turn)
         accumulator = StreamAccumulator(self.profile.quirks.reasoning_field)
         raw_chunks: list[dict[str, Any]] | None = (
             [] if self.tracer and self.tracer.raw_chunks else None

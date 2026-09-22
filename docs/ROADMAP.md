@@ -12,7 +12,7 @@
 | ✅ | **M3 权限 + 会话 + Headless** | allow/ask/deny 规则、工作目录边界、危险命令识别；JSONL 会话和 `sa --resume`；`sa run "..."` 单次无人值守执行 | 人在回路、状态持久化、无人值守的安全边界 |
 | 🚧 | **M4 个人自动化 v1** ⭐ | `sa daemon`（croniter）；`schedules.toml` 定义任务（prompt / profile / allowed_tools / notify）；`web_fetch`、`notify`（macOS 通知 + 飞书/Telegram webhook）、`schedule_add/list/remove` 工具；运行日志；可选 launchd 常驻 | 事件驱动 agent、无人值守的权限策略 |
 | ✅ | **M5 MCP 客户端** | 手写 stdio JSON-RPC（`server/discover` 探测，新协议每个请求带 `_meta`，旧 server 退回 `initialize`；`tools/list` → `tools/call`）；工具名 `mcp__<server>__<tool>`；子进程生命周期管理；先接 `@modelcontextprotocol/server-filesystem` 验证，再接日历/邮件/IM；远程 HTTP 和 OAuth 以后引入官方 `mcp` SDK | MCP 协议、工具生态接入 |
-| | **M6 上下文工程** | token 预算（上次 usage + 字符估算）；三级策略：写入时截断 → 清理旧 tool 结果 → LLM 摘要压缩（不拆开 tool_call 和它的结果）；`/compact`；保持 system prompt 和工具列表稳定以命中前缀缓存 | 上下文窗口管理、缓存友好的 prompt 设计 |
+| ✅ | **M6 上下文工程** | token 预算（上次 usage + 字符估算）；三级策略：写入时截断 → 清理旧 tool 结果 → LLM 摘要压缩（不拆开 tool_call 和它的结果）；`/compact`；保持 system prompt 和工具列表稳定以命中前缀缓存 | 上下文窗口管理、缓存友好的 prompt 设计 |
 | | **M7 记忆 + Skills + 项目指令** | `memory/` 文件记忆 + `MEMORY.md` 索引注入 prompt，配 memory 工具；Skills 只把 frontmatter 描述放进 prompt，正文由 `load_skill` 按需加载；自动注入 cwd 下的 `AGENTS.md` | 长期记忆、渐进式披露 |
 | | **M8 子 agent + 外部 agent + Hooks** | `task` 工具启动子 agent（独立上下文、受限工具集、只返回结论）；Claude Code / OpenCode 包装成工具（无头 CLI 流式输出，保存 session id 以便追问）；`todo` 工具；pre/post tool hooks（外部命令） | 上下文隔离、任务分解、多 agent 协作 |
 | | **M9 实验区（持续）** | `evals/`：真实任务加校验脚本，对比不同模型和 feature 开关；新 feature 通过开关接入，结论写进 notes | 用评测驱动迭代 |
@@ -44,6 +44,13 @@ filesystem server 还只讲旧协议，所以按规范建议先用 `server/disco
 MCP 的写文件工具。学习笔记见 [notes/M5-mcp-client.md](notes/M5-mcp-client.md)。
 M5 没有接日历 / 邮件 / IM：它们大多是远程 HTTP + OAuth 的 server，等引入官方 `mcp` SDK 时再做。
 M5 不依赖 M4 的剩余步骤，M4 的 `sa daemon` 以后直接复用 M5 的 `McpManager`。
+
+M6 已完成（2026-09-22，排在 M4 剩余步骤之前：daemon 无人值守、一轮里可能连调几十次工具，最需要这层保护）。
+预算用「上次的实际用量 + 之后新增部分的字符估算」，再用校准系数修正；三级策略是写入时截断（M2 已有）→
+清理旧工具结果（免费、确定）→ LLM 摘要压缩（切点不拆 tool_call 和结果）；另有 `/context`、`/compact`、
+上下文超长报错兜底。重点是和前缀缓存的取舍：摘要请求复用上一次请求的前缀，实测 DeepSeek 命中从 30%～58%
+修到 95%～97%（思考内容回传规则、先清后压都会破坏前缀）。工作台改成两份历史，顺带修掉了中断后历史不合法的 bug。
+学习笔记见 [notes/M6-context-engineering.md](notes/M6-context-engineering.md)。
 
 M4 完成后就是一个每天能真正用上的自动化 agent；M5–M8 在此基础上逐步增强。工作台的前置条件是 M2 的接口约定（见 [ARCHITECTURE.md](ARCHITECTURE.md#m2-起就要守住的接口约定)）和 M4 的后台常驻进程，具体时间点等设计完再定。
 

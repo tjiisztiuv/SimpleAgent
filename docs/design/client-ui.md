@@ -196,8 +196,10 @@ class Verification:
       space.toml              # 空间定义（可变，唯一真值）
       tmp/                    # 通用空间的工作目录（kind=generic）
       sessions/
-        <session-id>.jsonl    # 消息流，只追加
+        <session-id>.jsonl    # 消息流，只追加：界面显示实际发生过什么
         <session-id>.meta.json# 可变元信息：标题/状态/验证/时间戳/pin
+        model/
+          <session-id>.jsonl  # 模型看到的历史（M6）：SessionStore 的操作记录，含清理、压缩、中断修复
   tool_outputs/
   traces/
 ```

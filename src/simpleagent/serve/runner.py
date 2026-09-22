@@ -214,7 +214,13 @@ class Runner:
         space = self.store.get_space(space_id)
         if space is None:
             return
-        session = self.store.load_session(space_id, session_id)
+        # 内置 agent 用「模型看到的历史」（清理、压缩、中断修复都落在里面）；外部 CLI 的上下文
+        # 由它自己维护，这里只要用量。都要在落用户消息之前读，否则这条输入会被算进历史两次
+        session = (
+            self.store.load_model_session(space_id, session_id)
+            if space.executor == "simpleagent"
+            else self.store.load_session(space_id, session_id)
+        )
         try:
             # 先落用户消息再构造 agent：起不来的时候（没配 key、profile 不存在、外部 CLI
             # 还没接入）也要把用户说的这句留下来，否则刷新页面它就不见了。
@@ -485,6 +491,7 @@ class Runner:
             max_steps=self.config.max_steps,
             output_dir=output_dir,
             hidden_env=self.config.api_key_env_names(),
+            context=self.config.context,
         )
 
     def cwd_for(self, space: Space) -> Path:
