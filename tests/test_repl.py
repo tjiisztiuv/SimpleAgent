@@ -190,7 +190,8 @@ async def test_clear_is_persisted(config: Config, sa_home):
     assert store.load(repl.session.id).messages == []
 
 
-async def test_context_command(config: Config):
+async def test_context_command(config: Config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # 不让仓库自己的 AGENTS.md、技能目录影响结果
     h = Harness(
         config,
         {
@@ -200,7 +201,7 @@ async def test_context_command(config: Config):
     )
     await h.repl.handle("/context")
     assert "还没有实际用量" in h.output  # 还没请求过：全部按字符估
-    assert "工具 7 个" in h.output
+    assert "工具 10 个" in h.output  # 7 个内置 + 3 个记忆工具（M7）
 
     await h.repl.handle("hi")
     h.reset()

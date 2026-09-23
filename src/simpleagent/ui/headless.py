@@ -31,6 +31,8 @@ from simpleagent.events import (
     ToolCallStart,
     ToolResult,
 )
+from simpleagent.knowledge import Knowledge
+from simpleagent.knowledge.skills import SkillError
 from simpleagent.llm.client import LLM, LLMClient
 from simpleagent.mcp.manager import McpManager
 from simpleagent.permissions import Policy, WhitelistApprover
@@ -91,8 +93,11 @@ class Headless:
             raw_chunks=config.trace.raw_chunks,
         )
         factory = llm_factory or (lambda n, p: LLMClient(n, p, tracer=self.tracer))
+        # 项目指令、记忆索引、技能清单（M7）。记忆写入默认要确认，这里没人确认，
+        # 所以默认被拒；定时任务要写记忆就 --allow memory_write
+        self.knowledge = Knowledge.load(config, self.cwd)
         tools = ToolRegistry(
-            builtin_tools(),
+            [*builtin_tools(), *self.knowledge.tools()],
             max_output_chars=config.tool_output.max_chars,
             max_output_lines=config.tool_output.max_lines,
             approver=WhitelistApprover(allowed_tools),
@@ -101,7 +106,9 @@ class Headless:
         self.agent = Agent(
             llm=factory(name, config.profiles[name]),
             tools=tools,
-            system_prompt=build_system_prompt(config.system_prompt, cwd=self.cwd),
+            system_prompt=build_system_prompt(
+                config.system_prompt, cwd=self.cwd, knowledge=self.knowledge
+            ),
             cwd=self.cwd,
             max_steps=config.max_steps,
             output_dir=home_dir() / TOOL_OUTPUT_DIRNAME,
@@ -121,7 +128,16 @@ class Headless:
         """跑一个任务，返回退出码（0 正常，1 请求失败）。
 
         MCP server 启动失败只警告，不影响退出码：没有它，很多任务照样能做完。
+        prompt 是 `/技能名 补充说明` 时换成技能全文，和 REPL 里一样；技能读不出来退出码 1。
         """
+        try:
+            prompt = self.knowledge.skills.expand_command(prompt) or prompt
+        except SkillError as e:
+            self.err.write(f"技能加载失败：{e}\n")
+            return 1
+        # 状态走 stderr：`sa run ... > out.txt` 的正文里不混进这些
+        if summary := self.knowledge.summary():
+            self.err.write(summary + "\n")
         await self._start_mcp()
         try:
             return await self._run(prompt)

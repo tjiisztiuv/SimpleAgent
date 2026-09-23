@@ -165,6 +165,40 @@ class ContextConfig(BaseModel):
     compact_at: float = Field(0.8, ge=0, le=1)
 
 
+class InstructionsConfig(BaseModel):
+    """项目指令（M7）：会话开始时把 AGENTS.md 读进 system prompt。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # 每个目录按顺序取第一个存在的文件：没有 AGENTS.md 的目录用 CLAUDE.md（给 Claude Code 写的）
+    filenames: list[str] = Field(default_factory=lambda: ["AGENTS.md", "CLAUDE.md"], min_length=1)
+    # 所有指令文件加起来进 system prompt 的字数上限，超出的截掉并告诉模型原文在哪
+    max_chars: int = Field(32_000, ge=1000)
+
+
+class MemoryConfig(BaseModel):
+    """长期记忆（M7）：<home>/memory/，MEMORY.md 索引进 system prompt，正文按需读。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # memory_write / memory_delete 要不要先确认。记忆会进之后每个会话的 system prompt，
+    # 默认让人看一眼；sa run 里没人确认，默认拒绝（要写就 --allow memory_write）
+    confirm_writes: bool = True
+
+
+class SkillsConfig(BaseModel):
+    """技能（M7）：SKILL.md 的名字和描述进 system prompt，正文由 load_skill 按需加载。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # 除了 <home>/skills/ 之外还从哪些目录找。相对路径按项目根目录到 cwd 的每一层解析；
+    # 绝对路径（含 ~）照原样，比如加上 "~/.claude/skills" 就能用 Claude Code 的个人技能
+    dirs: list[str] = Field(default_factory=lambda: [".agents/skills", ".claude/skills"])
+
+
 class DebugConfig(BaseModel):
     """交互时的 debug 输出：显示 API 调用和工具调用的详细过程。
 
@@ -268,6 +302,9 @@ class Config(BaseModel):
     max_steps: int = Field(20, ge=1)
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    instructions: InstructionsConfig = Field(default_factory=InstructionsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)

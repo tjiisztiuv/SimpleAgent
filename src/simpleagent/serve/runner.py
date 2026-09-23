@@ -8,6 +8,8 @@
 - 支持取消（内置 loop 取消底层 asyncio 任务；外部 CLI 直接 terminate 进程）。
 - 支持手动触发验证命令，并把结果写成 verification 帧 + 落盘。
 - 持有一个 McpManager：MCP server 在后台事件循环里启动一次，所有空间、所有会话共用。
+- 每个会话第一次跑时读一次项目指令、记忆索引、技能清单（M7），连同拼好的 system prompt 记下来，
+  之后每轮都用这一份：Agent 每轮新建，system prompt 要是每轮重拼，中途改个记忆就整段缓存失效。
 
 线程模型：Runner 自己起一个线程跑 asyncio 事件循环；HTTP 层在另一个线程，通过
 run_coroutine_threadsafe / call_soon_threadsafe 与它通信，两者用总线（线程安全）解耦。
@@ -33,6 +35,7 @@ from simpleagent.agent.session import Session
 from simpleagent.agents import adapter_for
 from simpleagent.config import TOOL_OUTPUT_DIRNAME, Config, home_dir
 from simpleagent.events import Event, MessageDone, ToolResult
+from simpleagent.knowledge import Knowledge
 from simpleagent.mcp.manager import McpManager
 from simpleagent.panel.store import PanelStore
 from simpleagent.permissions import Policy
@@ -108,6 +111,8 @@ class Runner:
         # MCP server 跟着 serve 进程走，不跟着会话走：start() 时启动一次，所有空间共用
         self.mcp = McpManager(config.mcp_servers)
         self._mcp_started: concurrent.futures.Future[None] | None = None
+        # 会话 id → (会话开始时读到的 Knowledge, 拼好的 system prompt)。serve 重启后重新读
+        self._prompts: dict[str, tuple[Knowledge, str]] = {}
 
     # ----------------------------------------------------------------- 生命周期
     def start(self) -> None:
@@ -231,6 +236,9 @@ class Runner:
                 if self._mcp_started is not None:
                     await asyncio.wrap_future(self._mcp_started)
                 self._agents[session_id] = self._build_agent(space, session)
+                # `/技能名 补充说明`：模型看到技能全文，界面上的消息还是用户敲的原话
+                knowledge, _ = self._prompts[session_id]
+                user_input = knowledge.skills.expand_command(user_input) or user_input
         except Exception as e:  # noqa: BLE001
             # 起不来必须让客户端知道：这一段在原来是在 try 之外，异常会被 asyncio future
             # 吞掉，表现是「发了消息没有任何反应，且永远停在运行中」。典型触发：没配 API key、
@@ -470,19 +478,18 @@ class Runner:
             )
         profile = self.config.profiles[space.profile]
         llm = self.llm_factory(space.profile, profile)
+        cwd = self.cwd_for(space)
+        knowledge, system_prompt = self._session_prompt(session.id, cwd)
         tools = ToolRegistry(
-            [*builtin_tools(), *self.mcp.tools()],
+            [*builtin_tools(), *knowledge.tools(), *self.mcp.tools()],
             max_output_chars=self.config.tool_output.max_chars,
             max_output_lines=self.config.tool_output.max_lines,
         )
         approver = APIApprover(self.bus, self.pending, self.always_allow)
         tools.approver = approver
-        cwd = self.cwd_for(space)
         # 客户端模式也走同一套权限判定：越界和危险命令先被拦掉，剩下的才去问客户端
         tools.policy = Policy(cwd)
         output_dir = home_dir() / TOOL_OUTPUT_DIRNAME
-        system_prompt = build_system_prompt(self.config.system_prompt, cwd=cwd)
-        system_prompt += self.mcp.prompt_section()
         return Agent(
             llm=llm,
             tools=tools,
@@ -493,6 +500,21 @@ class Runner:
             hidden_env=self.config.api_key_env_names(),
             context=self.config.context,
         )
+
+    def _session_prompt(self, session_id: str, cwd: Path) -> tuple[Knowledge, str]:
+        """这个会话的 Knowledge 和 system prompt：第一次用到时读、拼，之后原样复用。
+
+        连日期一起冻住：跨过午夜的会话，system prompt 也不变。
+        """
+        cached = self._prompts.get(session_id)
+        if cached is None:
+            knowledge = Knowledge.load(self.config, cwd)
+            system_prompt = build_system_prompt(
+                self.config.system_prompt, cwd=cwd, knowledge=knowledge
+            )
+            cached = (knowledge, system_prompt + self.mcp.prompt_section())
+            self._prompts[session_id] = cached
+        return cached
 
     def cwd_for(self, space: Space) -> Path:
         """空间的工作目录：有 cwd 用它，没有就用 spaces/<id>/tmp。

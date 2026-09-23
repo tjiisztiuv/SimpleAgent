@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-23 M7 完成：项目指令（AGENTS.md）+ 长期记忆（memory/）+ 技能（SKILL.md）](2026-09-23-m7-memory-skills-instructions.md)
 - [2026-09-22 重打 v0.2.0 tag，发布日志补全 v0.1.0 以来的全部改动](2026-09-22-v0.2.0-retag.md)
 - [2026-09-22 MCP：修复 npx 卡住时的误导提示 + 新增按需启动（`start = "lazy"`）](2026-09-22-mcp-lazy-start-and-npx-hint-fix.md)
 - [2026-09-22 开发环境与日常环境隔离（`~/.simpleagent-dev`、开发模式端口 8385），发布 v0.2.0](2026-09-22-dev-env-isolation-v0.2.0-release.md)

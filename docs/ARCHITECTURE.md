@@ -233,6 +233,39 @@ StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Futur
 
 详细的取舍和实测记录见 [notes/M6-context-engineering.md](notes/M6-context-engineering.md)。
 
+### 项目指令、记忆、技能（M7，`knowledge/`）
+
+三样东西让 agent 不再每个会话都从零开始，共同的做法是**渐进式披露**：常驻 system prompt 的只放
+「目录」，内容按需取。
+
+| | 常驻 system prompt 的 | 按需取的 | 谁来写 |
+|---|---|---|---|
+| 项目指令 | AGENTS.md 全文（总共不超过 3.2 万字） | 超出部分：`read_file` 读原文 | 用户 |
+| 长期记忆 | `memory/MEMORY.md` 索引（每条一行，最多 6000 字） | 正文：`memory_read` | 模型（`memory_write`，默认要确认）和用户 |
+| 技能 | 每个技能一行名字 + 描述（最多 8000 字） | SKILL.md 正文：`load_skill`；附带文件：`read_file` / `bash` | 用户 |
+
+```
+Knowledge.load(config, cwd)            会话开始时读一次（knowledge/__init__.py）
+  ├ load_instructions()                个人 AGENTS.md → git 根 → … → cwd，每层取 AGENTS.md，没有再 CLAUDE.md
+  ├ MemoryStore.read_index()           记忆索引的快照
+  └ discover_skills(skill_roots())     个人 skills/ → [skills].dirs（相对路径按 git 根到 cwd 每层展开），先到先得
+.prompt_section()   → build_system_prompt() 追加在「# 环境」之后：项目指令 → 长期记忆 → 技能
+.tools()            → memory_read / memory_write / memory_delete / load_skill，排在内置工具之后、MCP 工具之前
+```
+
+- **会话内不变**：三样都在会话开始时定下来，中途改文件下个会话才生效；模型写的记忆也不回灌进本会话的
+  system prompt（它从对话里已经知道了）。工作台的 Agent 每轮新建，所以 Runner 按会话缓存
+  `(Knowledge, system prompt)`，连日期一起冻住
+- **记忆**：每条一个 `.md`（frontmatter：name / description / updated），索引由工具维护——只改链接到这个
+  文件的那一行，人手动加的分组、备注都保留；写文件先写临时文件再改名。记忆工具不报 `scope`：
+  记忆目录在工作目录之外，报了路径会被边界拒掉。写和删默认 ask，`sa run` 里没人确认就拒绝
+  （`--allow memory_write` 放行）；`[memory] confirm_writes = false` 改成直接放行
+- **技能**：按 SKILL.md 开放标准，frontmatter 用手写的 YAML 子集解析（`knowledge/frontmatter.py`，不引
+  PyYAML）。列表按名字排序；个人技能优先于项目里的同名技能。`disable-model-invocation: true` 的不进 prompt，
+  只能用户用 `/技能名 补充说明` 调用（`SkillCatalog.expand_command`，正文里的 `$ARGUMENTS` 换成补充说明；
+  REPL、`sa run`、工作台都支持，工作台界面上显示原话、模型看到展开后的全文）
+- 详细的取舍和实测记录见 [notes/M7-memory-skills-instructions.md](notes/M7-memory-skills-instructions.md)。
+
 ### LLM Client 与配置（M1，已实现）
 
 配置文件 `~/.simpleagent/config.toml`，由 `sa init` 生成，模板见 [`config.example.toml`](../src/simpleagent/config.example.toml)。每个 profile 包含：
@@ -267,7 +300,9 @@ StdioTransport（transport.py）子进程 + 按行收发 JSON-RPC：id → Futur
 | `logs/` | 定时任务运行日志 | M4 |
 | `tool_outputs/` | 过长工具输出的完整内容 | M2 |
 | `mcp_cache/<name>.json` | 按需启动（`start = "lazy"`）的 MCP server 上次的工具清单 | M5 |
-| `memory/`、`skills/` | 长期记忆、技能 | M7 |
+| `AGENTS.md` | 个人指令，所有项目通用（会话开始时进 system prompt） | M7 ✅ |
+| `memory/` | 长期记忆：`MEMORY.md` 索引 + 每条一个 `.md` | M7 ✅ |
+| `skills/<名字>/SKILL.md` | 个人技能 | M7 ✅ |
 
 ## 长期形态：个人 AI 工作台（具体内容待设计）
 
@@ -316,7 +351,7 @@ src/simpleagent/
   permissions.py          ✅ 权限：Decision / Scope / Policy（含 bash 危险命令识别）、审批器协议
   llm/client.py           ✅ 流式调用、chunk 拼接、思考内容、quirks
   llm/fake.py             ✅ 测试用的脚本化模型
-  agent/prompt.py         ✅ system prompt 组装（后续加 AGENTS.md、记忆、skills 列表）
+  agent/prompt.py         ✅ system prompt 组装：基础提示 + 环境 + 项目指令 / 记忆索引 / 技能列表（M7）
   agent/loop.py           ✅ Agent loop：工具调用循环、max_steps、中断后修复历史
   agent/session.py        ✅ 会话状态：消息历史、用量、JSONL 持久化与恢复
   agent/context.py        ✅ token 预算与校准、清理旧工具结果、摘要压缩的切点与指令、
@@ -342,8 +377,13 @@ src/simpleagent/
   mcp/manager.py          ✅ McpManager：并行启动、失败隔离、崩溃后下次调用时重启（5 分钟内最多 3 次）、
                           ✅ instructions 进 system prompt；REPL / sa run / sa serve 共用（M5）；按需启动
   mcp/cache.py            ✅ 按需启动用的工具清单缓存（启动参数指纹、原子写）
-  skills.py                  SKILL.md 发现与按需加载（M7）
-  ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp，M6 起有 /context、/compact）
+  knowledge/__init__.py   ✅ Knowledge：会话开始时读项目指令、记忆索引、技能清单，拼 prompt、给工具（M7）
+  knowledge/frontmatter.py ✅ Markdown frontmatter 的 YAML 子集解析和生成（技能、记忆共用）
+  knowledge/instructions.py ✅ AGENTS.md 查找（个人 → git 根 → … → cwd，CLAUDE.md 兜底）、字数预算
+  knowledge/memory.py     ✅ MemoryStore（每条一个文件、索引按行维护、原子写）、memory_read/write/delete
+  knowledge/skills.py     ✅ SKILL.md 发现（先到先得、同名覆盖记录）、load_skill、/技能名 展开
+  ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp，M6 起有 /context、/compact，
+                          ✅ M7 起有 /memory、/skills、/prompt 和 /<技能名>）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
   ui/approve.py           ✅ ConsoleApprover：终端 y / a / 其他键拒绝
   ui/debug.py             ✅ debug 输出：API 调用与工具调用的过程，走 stderr（off / on / verbose / full）

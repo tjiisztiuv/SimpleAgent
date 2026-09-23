@@ -289,3 +289,18 @@ def test_example_mcp_block_loads_when_uncommented(sa_home: Path):
     assert server.args[-1] == "~/notes"
     assert server.env_vars == ["GITHUB_TOKEN"]
     assert server.permissions == {"write_file": "allow"}
+
+
+def test_example_m7_blocks_load_when_uncommented(sa_home: Path):
+    """M7 的三段示例去掉注释后能加载，默认值和不写时一致。"""
+    text = example_config()
+    start, end = text.index("# [instructions]"), text.index("# [debug]")
+    block = "\n".join(line.removeprefix("# ") for line in text[start:end].splitlines())
+    _write(text[:start] + block + "\n" + text[end:])
+    config = load_config()
+    assert config.instructions.filenames == ["AGENTS.md", "CLAUDE.md"]
+    assert config.memory.confirm_writes is True
+    assert config.skills.dirs == [".agents/skills", ".claude/skills"]
+    assert config.model_dump(include={"instructions", "memory", "skills"}) == Config.model_validate(
+        {"default_profile": "a", "profiles": {"a": {"base_url": "http://x", "model": "m"}}}
+    ).model_dump(include={"instructions", "memory", "skills"})

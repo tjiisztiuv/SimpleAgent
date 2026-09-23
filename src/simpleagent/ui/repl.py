@@ -37,6 +37,8 @@ from simpleagent.events import (
     ToolCallStart,
     ToolResult,
 )
+from simpleagent.knowledge import Knowledge
+from simpleagent.knowledge.skills import SkillError
 from simpleagent.llm.client import LLM, LLMClient
 from simpleagent.mcp.manager import McpManager
 from simpleagent.permissions import Approver, Policy
@@ -67,6 +69,9 @@ HELP = '''命令：
   /usage          本会话的 token 用量
   /context        上下文占了多少、离上限还有多远、由哪些部分构成
   /compact [重点]  把早期对话压成摘要，只留最后一轮原文；可以说明要保留的重点
+  /memory         长期记忆：索引内容、存在哪、和本会话开始时比有没有变
+  /skills         可用的技能和它们的来源；/<技能名> [补充说明] 直接调用一个技能
+  /prompt         打印本会话的 system prompt（项目指令、记忆索引、技能列表都在里面）
   /help           显示帮助
   /exit           退出
 多行输入：单独一行输入 """ 开始，再输入 """ 结束。
@@ -248,16 +253,20 @@ class Repl:
         name = profile or config.default_profile
         if name not in config.profiles:
             raise ConfigError(f"没有名为 '{name}' 的 profile")
+        # 项目指令、记忆索引、技能清单：会话开始时读一次，之后不变（M7）
+        self.knowledge = Knowledge.load(config, cwd)
         self.agent = Agent(
             llm=self._make_llm(name),
             tools=ToolRegistry(
-                builtin_tools(),
+                [*builtin_tools(), *self.knowledge.tools()],
                 max_output_chars=config.tool_output.max_chars,
                 max_output_lines=config.tool_output.max_lines,
                 approver=approver or ConsoleApprover(input_fn=input_fn, out=self.out),
                 policy=policy or Policy(cwd),
             ),
-            system_prompt=build_system_prompt(config.system_prompt, cwd=cwd),
+            system_prompt=build_system_prompt(
+                config.system_prompt, cwd=cwd, knowledge=self.knowledge
+            ),
             cwd=cwd,
             max_steps=config.max_steps,
             output_dir=output_dir,
@@ -297,6 +306,8 @@ class Repl:
             self.print(f"trace：{self.tracer.dir}", DIM)
         if self.debug != "off":
             self.print(f"debug：{self.debug}，API 与工具调用的过程输出走 stderr", DIM)
+        if summary := self.knowledge.summary():
+            self.print(summary, DIM)
         with asyncio.Runner() as runner:
             try:
                 self._start_mcp(runner)
@@ -449,9 +460,67 @@ class Repl:
                     self.print(line)
             case "debug":
                 self._set_debug(arg)
+            case "memory":
+                self._show_memory()
+            case "skills":
+                self._show_skills()
+            case "prompt":
+                self.print(self.agent.system_prompt)
+                self.print(
+                    f"[共 {len(self.agent.system_prompt):,} 字；/context 看折合多少 token]", DIM
+                )
             case _:
-                self.print(f"未知命令 /{name}，输入 /help 查看")
+                await self._run_skill(line)
         return True
+
+    async def _run_skill(self, line: str) -> None:
+        """/<技能名> [补充说明]：把技能全文拼进这条用户消息，直接开始一轮对话。"""
+        name = line[1:].split(maxsplit=1)[0] if line[1:].strip() else ""
+        try:
+            expanded = self.knowledge.skills.expand_command(line)
+        except SkillError as e:
+            self.print(f"技能加载失败：{e}", RED)
+            return
+        if expanded is None:
+            self.print(f"未知命令 /{name}，输入 /help 查看（/skills 列出可用的技能）")
+            return
+        await self.chat(expanded)
+
+    def _show_memory(self) -> None:
+        store = self.knowledge.memory
+        if store is None:
+            self.print("长期记忆已关闭（config.toml 里 [memory] enabled = false）", DIM)
+            return
+        names = store.names()
+        self.print(f"记忆目录：{store.root}（{len(names)} 条）")
+        index = store.read_index()
+        self.print(index or "（还没有任何记忆：让模型「记住……」，或者自己往目录里放 .md 文件）")
+        if index != self.knowledge.memory_index:
+            self.print("[索引在本会话开始后改过：新的会话才会放进 system prompt]", DIM)
+        missing, dangling = store.check()
+        if missing:
+            self.print(f"[没进索引的记忆（模型看不到）：{'、'.join(missing)}]", RED)
+        if dangling:
+            self.print(f"[索引里指向不存在文件的：{'、'.join(dangling)}]", RED)
+
+    def _show_skills(self) -> None:
+        catalog = self.knowledge.skills
+        if not catalog.skills and not catalog.errors:
+            self.print(f"没有技能：在 {home_dir() / 'skills'}/<名字>/SKILL.md 写一个，", DIM)
+            self.print("或者放进项目的 .agents/skills/、.claude/skills/", DIM)
+            return
+        if catalog.roots:
+            self.print(f"技能目录：{'、'.join(str(root) for root in catalog.roots)}", DIM)
+        for skill in sorted(catalog.skills.values(), key=lambda item: item.name):
+            mark = "" if skill.model_invocable else "（只能手动 /调用）"
+            self.print(f"  {skill.name}{mark}", BOLD)
+            self.print(f"      {_clip(' '.join(skill.description.split()), 160)}")
+            self.print(f"      {skill.path}", DIM)
+        for skill in catalog.shadowed:
+            self.print(f"  [被同名技能覆盖，没加载] {skill.path}", DIM)
+        for path, reason in catalog.errors:
+            self.print(f"  [写坏了，没加载] {path}：{reason}", RED)
+        self.print("用 /<技能名> [补充说明] 直接调用；模型也会按描述自己用 load_skill 加载", DIM)
 
     async def _compact(self, instructions: str) -> None:
         # 只留最后一轮：手动压缩就是想腾地方，按自动压缩的 1/4 留，对话不长时几乎压不掉什么

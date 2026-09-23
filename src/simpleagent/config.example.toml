@@ -26,6 +26,27 @@ max_lines = 500     # 行数上限（两个上限都要满足）；完整内容�
 # compact_at = 0.8        # 清理之后还占到这个比例，就调 LLM 把早期对话压成摘要，保留最近约 1/4 的原文；
 #                         # 会多一次请求，之后的前缀缓存也会失效，所以排在清理之后；0 = 关闭
 
+# ---------------------------------------------------------------- 项目指令、记忆、技能（M7）
+# 三样都在会话开始时读一次、之后不变（中途改了文件，下个会话生效）：system prompt 一变，前缀缓存就全部失效。
+# REPL 里 /prompt 看拼出来的 system prompt，/memory、/skills 看各自的状态。
+
+# [instructions]
+# enabled = true
+# filenames = ["AGENTS.md", "CLAUDE.md"]  # 每个目录取第一个存在的；个人的放 ~/.simpleagent/AGENTS.md，
+#                                         # 项目的从 git 根目录一路找到 cwd，不在 git 仓库里只看 cwd
+# max_chars = 32000                       # 全部指令加起来的字数上限，超出的截掉并告诉模型原文在哪
+
+# [memory]
+# enabled = true           # ~/.simpleagent/memory/：每条记忆一个 .md，MEMORY.md 索引进 system prompt
+# confirm_writes = true    # memory_write / memory_delete 先问一句；sa run 里没人确认就拒绝，
+#                          # 定时任务要写记忆用 --allow memory_write
+
+# [skills]
+# enabled = true
+# dirs = [".agents/skills", ".claude/skills"]  # 除了 ~/.simpleagent/skills/<名字>/SKILL.md 还从哪找：
+#                                              # 相对路径按 git 根目录到 cwd 的每一层解析，绝对路径照原样；
+#                                              # 加上 "~/.claude/skills" 就能直接用 Claude Code 的个人技能
+
 # [debug]
 # enabled = false   # 交互时显示 API 调用和工具调用的过程（也可 sa --debug、REPL 里 /debug on）
 # verbose = true    # 再加每轮的消息清单（role + 字符数）和请求开关；过程输出走 stderr

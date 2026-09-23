@@ -23,6 +23,8 @@ agent loop、工具调用、权限、上下文都从零手写，只依赖 OpenAI
 - **给 sa 发消息**：脚本和定时任务可以用 `sa inbox push` 把结论投进控制面板。
 - **接 MCP server**：在配置里写上 `[mcp_servers.<名字>]`，它的工具就以 `mcp__<名字>__<工具>`
   出现在模型面前，终端、`sa run`、工作台都能用；新旧两代 MCP 协议都支持。
+- **记得住、带得上**：自动读工作目录的 `AGENTS.md`（没有就读 `CLAUDE.md`）；让它「记住」的事存成
+  Markdown 文件，下个会话还知道；按 `SKILL.md` 标准写的技能，模型按需加载，也能 `/技能名` 直接调用。
 
 ## 安装
 
@@ -71,7 +73,8 @@ sa sessions              # 列出已保存的会话
 ```
 
 REPL 里的命令：`/model [name]` 切模型、`/tools` 列工具、`/mcp` 看 MCP server 状态、`/usage` 看用量、
-`/context` 看上下文占用和构成、`/compact [重点]` 把早期对话压成摘要、`/clear` 清空历史、`/help`、`/exit`。
+`/context` 看上下文占用和构成、`/compact [重点]` 把早期对话压成摘要、`/memory` 看长期记忆、
+`/skills` 看技能、`/<技能名> [补充说明]` 调用技能、`/prompt` 看完整的 system prompt、`/clear` 清空历史、`/help`、`/exit`。
 要输入多行，单独一行敲 `"""` 开始，再敲一次 `"""` 结束；Ctrl+C 中断当前回复，Ctrl+D 退出。
 
 模型自己决定调哪个工具，终端里用灰色显示调用和结果预览。一轮对话最多请求模型 `max_steps` 次（默认 20），
@@ -164,6 +167,43 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
 
 其余选项（只暴露部分工具、按工具覆盖权限、超时、协议代际）见 `sa init` 生成的配置模板末尾。
 
+## 项目指令、记忆和技能
+
+三样东西都在**会话开始时读一次**，会话中途改了文件，下一个会话才生效（system prompt 在会话内保持不变，
+前缀缓存才命中得了）。启动时会打一行「项目指令 … · 记忆 3 条 · 技能 2 个」，`/prompt` 能看到拼出来的全文。
+
+**项目指令**：和 Claude Code、Codex 一样读 `AGENTS.md`。
+
+- 个人的写在 `~/.simpleagent/AGENTS.md`，所有项目通用（比如「回答用中文，先给结论」）
+- 项目的放在项目里：从 git 根目录一路到当前目录，每层一份，越深越具体；不在 git 仓库里只看当前目录
+- 某一层没有 `AGENTS.md` 就读 `CLAUDE.md`，给 Claude Code 写过的目录不用再抄一份
+
+**长期记忆**：对它说「记住……」，它会调 `memory_write` 存进 `~/.simpleagent/memory/`（每条一个 `.md`，
+`MEMORY.md` 是索引）。每个会话开始时索引进 system prompt，要细节时它自己 `memory_read`。
+
+- 写和删要你按 `y` 确认：记忆会进之后每个会话，别让网页或文件里的内容骗它记下假东西。
+  嫌烦就在 `[memory]` 里 `confirm_writes = false`
+- `sa run` 里没人确认，默认不许写；定时任务要写记忆就 `--allow memory_write`
+- 都是普通 Markdown：可以直接改、删、调整 `MEMORY.md` 的顺序和分组，`/memory` 会提示对不上的地方
+
+**技能**：一个目录一个技能，里面一个 `SKILL.md`（格式是 agentskills.io 的开放标准，Claude Code 的技能直接能用）：
+
+```markdown
+---
+name: weekly-note
+description: 写本周小结。用户要「周报」「本周小结」时使用
+---
+1. 用 list_dir 看一下工作目录……
+2. 按下面的格式输出……
+```
+
+- 放在 `~/.simpleagent/skills/<名字>/`（个人），或者项目里的 `.agents/skills/<名字>/`、`.claude/skills/<名字>/`；
+  同名的个人技能优先
+- system prompt 里只有名字和 `description`，模型觉得任务对得上才用 `load_skill` 读正文，
+  所以 `description` 要写清楚「什么时候用」
+- 也可以自己点名：`/weekly-note 这周重点是 M7`，正文里的 `$ARGUMENTS` 会换成后面的补充说明。
+  frontmatter 加 `disable-model-invocation: true` 的技能只能这样手动调用
+
 ## 配置和数据
 
 配置在 `~/.simpleagent/config.toml`（`sa init` 生成，里面每项都有注释）：
@@ -177,6 +217,9 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
 | `[trace]` | 是否把每次请求响应落盘，调试协议时用 |
 | `[tool_output]` | 工具结果回给模型的字符和行数上限 |
 | `[context]` | 上下文快满时怎么腾地方：占到多少比例清理旧工具结果、保留最近几个，再满就把早期对话压成摘要 |
+| `[instructions]` | 读哪些指令文件（默认 `AGENTS.md`，没有再 `CLAUDE.md`）、总字数上限 |
+| `[memory]` | 长期记忆开关、写记忆要不要确认 |
+| `[skills]` | 技能开关、除了 `~/.simpleagent/skills/` 还从哪些目录找（比如加上 `~/.claude/skills`） |
 | `[panel]` | 控制面板的消息多久自动归档 |
 | `[profiles.*]` | 各家模型：`base_url`、`api_key_env`、`model`、`context_window`，以及各家私有参数 |
 | `[mcp_servers.*]` | MCP server：`command`、`args`、`env_vars`，以及工具过滤、权限覆盖、超时 |
@@ -187,6 +230,9 @@ sa mcp list              # 把每个 server 启动一遍，列出状态和工具
 ~/.simpleagent/
   config.toml          配置
   .env                 API key（建议 chmod 600）
+  AGENTS.md            个人指令，所有项目通用
+  memory/              长期记忆：MEMORY.md 索引 + 每条一个 .md
+  skills/              个人技能：<名字>/SKILL.md
   sessions/            终端会话历史（JSONL）
   spaces/              工作台的空间和它们的会话
   panel/               控制面板的消息和待办

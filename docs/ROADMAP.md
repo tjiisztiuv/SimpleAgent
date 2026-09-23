@@ -13,7 +13,7 @@
 | 🚧 | **M4 个人自动化 v1** ⭐ | `sa daemon`（croniter）；`schedules.toml` 定义任务（prompt / profile / allowed_tools / notify）；`web_fetch`、`notify`（macOS 通知 + 飞书/Telegram webhook）、`schedule_add/list/remove` 工具；运行日志；可选 launchd 常驻 | 事件驱动 agent、无人值守的权限策略 |
 | ✅ | **M5 MCP 客户端** | 手写 stdio JSON-RPC（`server/discover` 探测，新协议每个请求带 `_meta`，旧 server 退回 `initialize`；`tools/list` → `tools/call`）；工具名 `mcp__<server>__<tool>`；子进程生命周期管理；先接 `@modelcontextprotocol/server-filesystem` 验证，再接日历/邮件/IM；远程 HTTP 和 OAuth 以后引入官方 `mcp` SDK | MCP 协议、工具生态接入 |
 | ✅ | **M6 上下文工程** | token 预算（上次 usage + 字符估算）；三级策略：写入时截断 → 清理旧 tool 结果 → LLM 摘要压缩（不拆开 tool_call 和它的结果）；`/compact`；保持 system prompt 和工具列表稳定以命中前缀缓存 | 上下文窗口管理、缓存友好的 prompt 设计 |
-| | **M7 记忆 + Skills + 项目指令** | `memory/` 文件记忆 + `MEMORY.md` 索引注入 prompt，配 memory 工具；Skills 只把 frontmatter 描述放进 prompt，正文由 `load_skill` 按需加载；自动注入 cwd 下的 `AGENTS.md` | 长期记忆、渐进式披露 |
+| ✅ | **M7 记忆 + Skills + 项目指令** | `memory/` 文件记忆 + `MEMORY.md` 索引注入 prompt，配 memory 工具；Skills 只把 frontmatter 描述放进 prompt，正文由 `load_skill` 按需加载；自动注入 cwd 下的 `AGENTS.md` | 长期记忆、渐进式披露 |
 | | **M8 子 agent + 外部 agent + Hooks** | `task` 工具启动子 agent（独立上下文、受限工具集、只返回结论）；Claude Code / OpenCode 包装成工具（无头 CLI 流式输出，保存 session id 以便追问）；`todo` 工具；pre/post tool hooks（外部命令） | 上下文隔离、任务分解、多 agent 协作 |
 | | **M9 实验区（持续）** | `evals/`：真实任务加校验脚本，对比不同模型和 feature 开关；新 feature 通过开关接入，结论写进 notes | 用评测驱动迭代 |
 | | **W 个人 AI 工作台** | 桌面客户端 + 常驻后台引擎（本地 API、通知路由、客户端审批）。功能清单和客户端技术栈**待设计** | 客户端/服务端分离、事件推送 |
@@ -52,6 +52,15 @@ M6 已完成（2026-09-22，排在 M4 剩余步骤之前：daemon 无人值守�
 修到 95%～97%（思考内容回传规则、先清后压都会破坏前缀）。工作台改成两份历史，顺带修掉了中断后历史不合法的 bug。
 学习笔记见 [notes/M6-context-engineering.md](notes/M6-context-engineering.md)。
 
+M7 已完成（2026-09-23）：新的 `knowledge/` 包在会话开始时读三样东西——项目指令（个人 `AGENTS.md` +
+git 根到 cwd 每层一份，没有就读 `CLAUDE.md`）、长期记忆（`memory/` 每条一个文件，`MEMORY.md` 索引进
+system prompt，`memory_read / write / delete` 三个工具，写入默认要确认）、技能（SKILL.md 开放标准，
+名字和描述进 prompt，`load_skill` 按需读正文，`/技能名` 手动调用）。三样都「会话内不变」，工作台按会话
+缓存 system prompt，保住 M6 的前缀缓存。REPL 加了 `/memory`、`/skills`、`/prompt`。deepseek-flash 实测：
+说「记住」第一步就调 `memory_write`、新会话只看索引那一行就答对、任务对上描述就先 `load_skill`；
+三样合计每次请求多约 1,000 token。学习笔记见 [notes/M7-memory-skills-instructions.md](notes/M7-memory-skills-instructions.md)。
+工作台左栏的「知识库」页面还没做（能在对话里用记忆和技能，但还不能在界面上浏览、编辑）。
+
 M4 完成后就是一个每天能真正用上的自动化 agent；M5–M8 在此基础上逐步增强。工作台的前置条件是 M2 的接口约定（见 [ARCHITECTURE.md](ARCHITECTURE.md#m2-起就要守住的接口约定)）和 M4 的后台常驻进程，具体时间点等设计完再定。
 
 ## 各里程碑验证方式
@@ -61,3 +70,5 @@ M4 完成后就是一个每天能真正用上的自动化 agent；M5–M8 在此
 - **M4**：添加一个每分钟触发的任务，启动 `sa daemon`，确认收到 macOS 通知并生成运行日志
 - **M5**：接上 filesystem MCP server，模型能调用 `mcp__filesystem__*` 工具
 - **M6**：用 FakeLLM 构造超出预算的历史，断言压缩后 tool_call 和结果配对完整、总 token 数在预算内
+- **M7**：FakeLLM 走通「记住 → memory_write → 下个会话索引里有」和「prompt 里只有描述 → load_skill → 正文进上下文」；
+  断言一个会话里（含工作台跨轮）system prompt 不变；真实模型实测记忆写入、跨会话读取、按描述加载技能
