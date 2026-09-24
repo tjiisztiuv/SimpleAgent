@@ -11,6 +11,8 @@ from simpleagent.spaces.models import (
     SpaceSpec,
     Verification,
     VerifyConfig,
+    locked_reason,
+    validate_executor,
 )
 from simpleagent.spaces.store import SpaceStore
 
@@ -23,4 +25,6 @@ __all__ = [
     "SpaceStore",
     "Verification",
     "VerifyConfig",
+    "locked_reason",
+    "validate_executor",
 ]

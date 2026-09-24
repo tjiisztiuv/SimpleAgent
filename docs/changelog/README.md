@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-24 空间新建后支持修改执行者，切换只影响新会话（老会话锁在原执行者，只读）](2026-09-24-space-change-executor.md)
 - [2026-09-23 M7 完成：项目指令（AGENTS.md）+ 长期记忆（memory/）+ 技能（SKILL.md）](2026-09-23-m7-memory-skills-instructions.md)
 - [2026-09-22 重打 v0.2.0 tag，发布日志补全 v0.1.0 以来的全部改动](2026-09-22-v0.2.0-retag.md)
 - [2026-09-22 MCP：修复 npx 卡住时的误导提示 + 新增按需启动（`start = "lazy"`）](2026-09-22-mcp-lazy-start-and-npx-hint-fix.md)

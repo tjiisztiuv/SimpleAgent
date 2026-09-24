@@ -19,8 +19,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from simpleagent.agents.base import SAFE
 from simpleagent.config import home_dir
 from simpleagent.spaces.models import (
+    DEFAULT_CLI_COMMAND,
     AgentBinding,
     GenericConfig,
     SessionMeta,
@@ -28,11 +30,16 @@ from simpleagent.spaces.models import (
     SpaceSpec,
     VerifyConfig,
     _now,
+    validate_executor,
 )
 
 SPACES_DIRNAME = "spaces"
 # 旧文件没有 permission 字段时按「只读」处理：宁可少给权限
 DEFAULT_PERMISSION = "safe"
+# update_space 能逐个改的字段。「谁跑」那组（executor 等）不在这里，走 change_executor
+UPDATABLE_FIELDS = frozenset(
+    {"name", "profile", "opened", "pinned", "last_opened_at", "keep_sessions"}
+)
 
 
 def new_id(prefix: str) -> str:
@@ -212,11 +219,53 @@ class SpaceStore:
         space = self.get_space(space_id)
         if space is None:
             raise KeyError(f"空间不存在: {space_id}")
-        allowed = {"name", "profile", "opened", "pinned", "last_opened_at", "keep_sessions"}
         for k, v in fields.items():
-            if k not in allowed:
+            if k not in UPDATABLE_FIELDS:
                 raise ValueError(f"不能修改字段 {k}")
             setattr(space, k, v)
+        self._write_space_toml(space)
+        return space
+
+    def change_executor(
+        self,
+        space_id: str,
+        executor: str,
+        *,
+        profile: str | None = None,
+        cli_model: str | None = None,
+        permission: str = SAFE,
+        command: str | None = None,
+        args: list[str] | None = None,
+    ) -> Space:
+        """切换空间的执行者。只影响之后新建的会话：老会话的执行者锁在 meta.agent 里。
+
+        不走 update_space 的逐字段 setattr：executor / cli_model / permission / [agent]
+        必须一起变，否则会落下「内置执行者还挂着 [agent] 段」这种半新半旧的状态。
+        """
+        space = self.get_space(space_id)
+        if space is None:
+            raise KeyError(f"空间不存在: {space_id}")
+        validate_executor(executor, cli_model=cli_model, permission=permission, command=command)
+        if executor == "simpleagent":
+            # 外部 CLI 的那几项全部清掉，免得 space.toml 里留着不生效的配置
+            space.agent = None
+            space.cli_model = None
+            space.permission = SAFE
+        else:
+            # 执行者没变、也没指定新命令（比如只改权限）：保留手写的启动命令和参数
+            if space.executor == executor and space.agent and command is None and args is None:
+                binding = space.agent
+            else:
+                binding = AgentBinding(
+                    command=command or DEFAULT_CLI_COMMAND[executor], args=list(args or [])
+                )
+            space.agent = binding
+            space.cli_model = cli_model
+            space.permission = permission
+        # profile 两种执行者都存着：切到外部 CLI 时也记下来，切回内置时接着用
+        if profile:
+            space.profile = profile
+        space.executor = executor
         self._write_space_toml(space)
         return space
 

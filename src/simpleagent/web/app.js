@@ -35,6 +35,7 @@ const state = {
   showAll: new Set(),     // 展开了「查看全部」的空间 id
   filter: "",
   tab: "chat",            // 当前右栏 tab
+  editingSpace: null,     // 向导处于「空间设置」模式时是那个空间，新建时为 null
 };
 
 /* ────────────────────────────── 请求封装 ────────────────────────────── */
@@ -125,6 +126,15 @@ function badgeFor(sp) {
   return BADGE[exec] || ["SA", "b-sa"];
 }
 
+/* 会话的执行者在创建时锁定（meta.agent）。空间中途切过执行者的话，老会话的历史在原执行者那边，
+   接不过来：只能看、导出，不能再发消息（后端同样会拒，返回 409）。 */
+function lockedBy(sp, m) {
+  if (!sp || !m) return null;
+  const exec = sp.executor || "simpleagent";
+  const agent = m.agent || "simpleagent";
+  return agent === exec ? null : agent;
+}
+
 function statusDot(s) {
   return s === "running" ? "●" : s === "error" ? "✗" : s === "done" ? "✓" : s === "cancelled" ? "⊘" : "○";
 }
@@ -170,6 +180,7 @@ function renderSpaces() {
         ${vsum}
         <span class="space-actions">
           <button class="icon-btn" title="在这个空间新建会话" data-act="new-session">＋</button>
+          <button class="icon-btn" title="空间设置（名称、执行者、模型、权限）" data-act="settings">⚙</button>
           <button class="icon-btn" title="关闭（只是不显示，不删数据）" data-act="close">×</button>
         </span>
       </div>
@@ -187,9 +198,15 @@ function renderSpaces() {
       const [mk, mcls] = VMARK[(m.verification || {}).status] || VMARK.unknown;
       const row = document.createElement("div");
       row.className = "session" + (m.id === state.sessionId ? " is-active" : "");
+      const locked = lockedBy(sp, m);
+      const [lk, lkcls] = BADGE[locked] || [];
+      const lockBadge = locked
+        ? `<span class="badge ${lkcls || ""} locked" title="由 ${escapeHtml(locked)} 跑的会话，空间已切换执行者，只读">${lk || escapeHtml(locked)}</span>`
+        : "";
       row.innerHTML = `
         <span class="st ${m.status}">${statusDot(m.status)}</span>
         <span class="title" title="${escapeHtml(m.title || "")}">${m.pinned ? "★ " : ""}${escapeHtml(m.title || "新会话")}</span>
+        ${lockBadge}
         <span class="vmark ${mcls}">${mk}</span>
         <span class="time">${relTime(m.updated_at || m.created_at)}</span>
         <span class="row-actions">
@@ -229,6 +246,10 @@ function renderSpaces() {
     card.querySelector('[data-act="new-session"]').onclick = (ev) => {
       ev.stopPropagation();
       newSession(sp.id);
+    };
+    card.querySelector('[data-act="settings"]').onclick = (ev) => {
+      ev.stopPropagation();
+      openModal(sp);
     };
     card.querySelector('[data-act="close"]').onclick = async (ev) => {
       ev.stopPropagation();
@@ -317,13 +338,17 @@ function renderHeader() {
     uc.classList.add("hidden");
   }
 
+  const locked = lockedBy(sp, m);
   $("btn-new-session").disabled = !sp;
-  $("btn-rerun").disabled = !m || state.running;
+  $("btn-rerun").disabled = !m || state.running || !!locked;
   $("btn-export").disabled = !m;
   $("btn-verify").disabled = !m;
   $("btn-stop").disabled = !state.running;
-  $("input").disabled = !m || state.running;
-  $("btn-send").disabled = !m || state.running;
+  $("input").disabled = !m || state.running || !!locked;
+  $("btn-send").disabled = !m || state.running || !!locked;
+  $("input").placeholder = locked
+    ? `这个会话由 ${locked} 跑，空间已切到 ${sp.executor}：新建会话继续，或在 ⚙ 里把空间切回去`
+    : "输入消息…（Enter 发送 · Shift+Enter 换行）";
   const ps = $("profile");
   const external = !!sp && (sp.executor || "simpleagent") !== "simpleagent";
   ps.disabled = !sp || external;
@@ -1433,12 +1458,34 @@ async function send() {
 }
 
 /* ────────────────────────────── 新建空间向导 ────────────────────────────── */
-function openModal() {
+/* 同一个弹窗两种用法：不传 sp 是新建；传 sp 是「空间设置」，只能改名称和「谁跑」那几项，
+   「在哪儿跑」（形态、目录）置灰，验证命令暂不开放编辑。 */
+function openModal(sp) {
+  const editing = sp && sp.id ? sp : null;
+  state.editingSpace = editing;
   $("modal").classList.remove("hidden");
-  $("f-name").value = "";
-  $("f-cwd").value = "";
-  $("f-verify").value = "";
+  $("modal-title").textContent = editing ? "空间设置" : "新建空间";
+  $("f-create").textContent = editing ? "保存" : "创建";
+  $("f-kind").disabled = !!editing;
+  $("f-cwd").disabled = !!editing;
+  $("f-verify-wrap").classList.toggle("hidden", !!editing);
   $("modal-err").textContent = "";
+  if (editing) {
+    $("f-name").value = editing.name;
+    $("f-kind").value = editing.kind;
+    $("f-cwd").value = editing.cwd || "";
+    $("f-executor").value = editing.executor || "simpleagent";
+    fillExecutorDependents();
+    if ($("f-executor").value === "simpleagent") {
+      if (state.profiles.includes(editing.profile)) $("f-profile").value = editing.profile;
+    } else {
+      $("f-permission").value = editing.permission || "safe";
+    }
+  } else {
+    $("f-name").value = "";
+    $("f-cwd").value = "";
+    $("f-verify").value = "";
+  }
   syncModalFields();
   $("f-name").focus();
 }
@@ -1483,18 +1530,15 @@ function syncModalFields() {
   $("f-perm-wrap").classList.toggle("hidden", !external);
   $("f-model-label").textContent = external ? "模型" : "模型 profile";
   $("f-perm-hint").classList.toggle("hidden", !external || $("f-permission").value !== "full");
+  const ed = state.editingSpace;
+  $("f-switch-hint").classList.toggle(
+    "hidden", !ed || (ed.executor || "simpleagent") === $("f-executor").value);
 }
 
-async function createSpace() {
-  const name = $("f-name").value.trim();
-  if (!name) { $("modal-err").textContent = "名称不能为空"; return; }
-  const kind = $("f-kind").value;
+/* 「谁跑」那几项的请求体，新建和空间设置共用 */
+function executorFields() {
   const executor = $("f-executor").value;
-  const body = { name, kind, executor };
-  if (kind === "agent") {
-    body.cwd = $("f-cwd").value.trim();
-    if (!body.cwd) { $("modal-err").textContent = "绑定目录的空间必须填工作目录"; return; }
-  }
+  const body = { executor };
   if (executor === "simpleagent") {
     body.profile = $("f-profile").value;
   } else {
@@ -1502,6 +1546,45 @@ async function createSpace() {
     const cliModel = $("f-profile").value;
     if (cliModel) body.cli_model = cliModel;
     body.permission = $("f-permission").value;
+  }
+  return body;
+}
+
+async function saveSpaceSettings() {
+  const sp = state.editingSpace;
+  const name = $("f-name").value.trim();
+  if (!name) { $("modal-err").textContent = "名称不能为空"; return; }
+  const btn = $("f-create");
+  btn.disabled = true;
+  btn.textContent = "保存中…";
+  $("modal-err").textContent = "";
+  try {
+    await api.patch(`/api/spaces/${sp.id}`, { name, ...executorFields() });
+  } catch (e) {
+    $("modal-err").textContent = `保存失败：${e.message}`;
+    return;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存";
+  }
+  $("modal").classList.add("hidden");
+  state.editingSpace = null;
+  try {
+    await loadSpaces();
+  } catch (e) {
+    toast(`已保存，但刷新列表失败：${e.message}`);
+  }
+}
+
+async function createSpace() {
+  if (state.editingSpace) { await saveSpaceSettings(); return; }
+  const name = $("f-name").value.trim();
+  if (!name) { $("modal-err").textContent = "名称不能为空"; return; }
+  const kind = $("f-kind").value;
+  const body = { name, kind, ...executorFields() };
+  if (kind === "agent") {
+    body.cwd = $("f-cwd").value.trim();
+    if (!body.cwd) { $("modal-err").textContent = "绑定目录的空间必须填工作目录"; return; }
   }
   const v = $("f-verify").value.trim();
   if (v) { body.verify_command = v; body.verify_trigger = "on_stop"; }
@@ -1540,8 +1623,11 @@ async function boot() {
   fillExecutorOptions();
   await loadSpaces();
 
-  $("btn-new-space").onclick = openModal;
-  $("f-cancel").onclick = () => $("modal").classList.add("hidden");
+  $("btn-new-space").onclick = () => openModal();
+  $("f-cancel").onclick = () => {
+    $("modal").classList.add("hidden");
+    state.editingSpace = null;
+  };
   $("f-create").onclick = createSpace;
   $("f-kind").onchange = syncModalFields;
   $("f-executor").onchange = () => {

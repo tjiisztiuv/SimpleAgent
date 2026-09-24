@@ -24,8 +24,8 @@ from simpleagent.panel.summary import one_line, summarize
 from simpleagent.serve.bus import frame_to_sse
 from simpleagent.serve.runner import Runner
 from simpleagent.serve.static import asset_bytes
-from simpleagent.spaces.models import EXECUTOR_LABELS, EXECUTORS, SpaceSpec
-from simpleagent.spaces.store import SpaceStore
+from simpleagent.spaces.models import EXECUTOR_LABELS, EXECUTORS, SpaceSpec, locked_reason
+from simpleagent.spaces.store import UPDATABLE_FIELDS, SpaceStore
 from simpleagent.tools.walk import IGNORED_DIRS
 
 # SSE 空闲时多久发一次 keepalive 注释帧。它同时承担「探测客户端是否还活着」的职责：
@@ -280,9 +280,48 @@ class Server:
             data = json.loads(body or b"{}")
         except json.JSONDecodeError:
             return Response(400, {"error": "invalid json"})
+        if not isinstance(data, dict):
+            return Response(400, {"error": "body 必须是 JSON 对象"})
+        current = self.store.get_space(space_id)
+        if current is None:
+            return Response(404, {"error": "space not found"})
+        profile = data.get("profile")
+        if profile is not None and profile not in self.config.profiles:
+            return Response(
+                400,
+                {"error": f"profile「{profile}」不在 config.toml 里"},
+            )
+        # 「谁跑」这组字段必须和 executor 一起提交，由 change_executor 一次改完；
+        # 单改 permission 之类会落下半新半旧的状态
+        exec_keys = {"executor", "cli_model", "permission", "command", "args"}
+        exec_fields = {k: data.pop(k) for k in list(data) if k in exec_keys}
+        # 先把字段全部查一遍再动手：不然执行者已经切了，后面的字段才报错，落下改了一半的空间
+        unknown = set(data) - UPDATABLE_FIELDS
+        if unknown:
+            return Response(400, {"error": f"不能修改字段 {'、'.join(sorted(unknown))}"})
+        if exec_fields and "executor" not in exec_fields:
+            return Response(
+                400, {"error": "改 cli_model / permission / command / args 要带上 executor"}
+            )
         try:
-            space = self.store.update_space(space_id, **data)
-        except (KeyError, ValueError) as e:
+            if exec_fields:
+                # 只有真换执行者才要等会话停下。「空间设置」保存时总会带上 executor，
+                # 执行者没变（只改名、改权限）就不拦：跑着的那轮已经按旧配置拉起来了
+                if exec_fields["executor"] != current.executor and self.runner.space_busy(space_id):
+                    return Response(409, {"error": "这个空间还有会话在跑，停下来再切执行者"})
+                self.store.change_executor(
+                    space_id,
+                    exec_fields.pop("executor"),
+                    profile=data.pop("profile", None),
+                    permission=exec_fields.pop("permission", None) or SAFE,
+                    **exec_fields,
+                )
+            space = (
+                self.store.update_space(space_id, **data)
+                if data
+                else self.store.get_space(space_id)
+            )
+        except (KeyError, TypeError, ValueError) as e:
             return Response(400, {"error": str(e)})
         return Response(200, self._space_view(space))
 
@@ -347,6 +386,8 @@ class Server:
         text = data.get("text")
         if not text or not str(text).strip():
             return Response(400, {"error": "text 不能为空"})
+        if reason := self._locked(space_id, session_id):
+            return Response(409, {"error": reason})
         self.runner.run_input(space_id, session_id, str(text))
         return Response(202, {"accepted": True})
 
@@ -370,8 +411,19 @@ class Server:
         text = last.get("content")
         if not isinstance(text, str) or not text.strip():
             return Response(400, {"error": "最后一条用户消息不是纯文本，无法重跑"})
+        if reason := self._locked(space_id, session_id):
+            return Response(409, {"error": reason})
         self.runner.run_input(space_id, session_id, text)
         return Response(202, {"accepted": True, "text": text})
+
+    def _locked(self, space_id: str, session_id: str) -> str | None:
+        """会话被锁住（空间中途切过执行者）时返回原因。runner 里还有一道同样的检查，
+        这里先挡一次是为了让前端同步拿到 409，而不是等 SSE 里的 error 帧。"""
+        space = self.store.get_space(space_id)
+        meta = self.store.get_session_meta(space_id, session_id)
+        if space is None or meta is None or meta.agent == space.executor:
+            return None
+        return locked_reason(meta.agent, space.executor)
 
     def _session_cancel(self, session_id: str) -> Response:
         self.runner.cancel(session_id)
