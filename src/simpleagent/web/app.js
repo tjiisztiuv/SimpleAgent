@@ -15,6 +15,11 @@ const FRAME_TYPES = [
 
 const LS_KEY = "sa.workbench.current";   // 记住上次打开的会话，刷新后自动回到原位
 
+/* 这次按键是不是输入法在用：选词、把拼音串原样上屏时按的 Enter 是确认候选，不是发送。
+   Chrome / Firefox 里这次 keydown 的 isComposing 是 true；Safari 先发 compositionend
+   再发 keydown，isComposing 已经变回 false，只能靠 keyCode 229（输入法占用）认出来。 */
+const imeBusy = (e) => e.isComposing || e.keyCode === 229;
+
 const state = {
   spaces: [],
   profiles: [],
@@ -290,6 +295,7 @@ function startRename(row, meta) {
     renderSpaces();
   };
   input.addEventListener("keydown", (e) => {
+    if (imeBusy(e)) return;
     if (e.key === "Enter") { e.preventDefault(); finish(true); }
     if (e.key === "Escape") { e.preventDefault(); finish(false); }
   });
@@ -1376,6 +1382,7 @@ async function addTodoInline() {
     await loadPanel();
   };
   input.addEventListener("keydown", (e) => {
+    if (imeBusy(e)) return;
     if (e.key === "Enter") { e.preventDefault(); finish(true); }
     if (e.key === "Escape") { e.preventDefault(); finish(false); }
   });
@@ -1724,7 +1731,7 @@ function applySlash(i, submit) {
 
 /* 输入框的按键：菜单开着时 ↑↓ / Tab / Enter / Esc 归菜单，其余照常 */
 function onInputKeydown(e) {
-  if (e.isComposing) return;  // 输入法正在选词，这时的 Enter 是确认候选字，不是发送
+  if (imeBusy(e)) return;
   if (slash.open) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -2039,6 +2046,7 @@ async function boot() {
   $("btn-dispatch").onclick = dispatch;
   $("dispatch-input").addEventListener("input", updateMentions);
   $("dispatch-input").addEventListener("keydown", (e) => {
+    if (imeBusy(e)) return;
     const mn = panelState.mentions;
     if (mn.open) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
