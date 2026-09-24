@@ -14,7 +14,7 @@
 | ✅ | **M5 MCP 客户端** | 手写 stdio JSON-RPC（`server/discover` 探测，新协议每个请求带 `_meta`，旧 server 退回 `initialize`；`tools/list` → `tools/call`）；工具名 `mcp__<server>__<tool>`；子进程生命周期管理；先接 `@modelcontextprotocol/server-filesystem` 验证，再接日历/邮件/IM；远程 HTTP 和 OAuth 以后引入官方 `mcp` SDK | MCP 协议、工具生态接入 |
 | ✅ | **M6 上下文工程** | token 预算（上次 usage + 字符估算）；三级策略：写入时截断 → 清理旧 tool 结果 → LLM 摘要压缩（不拆开 tool_call 和它的结果）；`/compact`；保持 system prompt 和工具列表稳定以命中前缀缓存 | 上下文窗口管理、缓存友好的 prompt 设计 |
 | ✅ | **M7 记忆 + Skills + 项目指令** | `memory/` 文件记忆 + `MEMORY.md` 索引注入 prompt，配 memory 工具；Skills 只把 frontmatter 描述放进 prompt，正文由 `load_skill` 按需加载；自动注入 cwd 下的 `AGENTS.md` | 长期记忆、渐进式披露 |
-| | **M8 子 agent + 外部 agent + Hooks** | `task` 工具启动子 agent（独立上下文、受限工具集、只返回结论）；Claude Code / OpenCode 包装成工具（无头 CLI 流式输出，保存 session id 以便追问）；`todo` 工具；pre/post tool hooks（外部命令） | 上下文隔离、任务分解、多 agent 协作 |
+| 🚧 | **M8 子 agent + 外部 agent + Hooks** | `task` 工具启动子 agent（独立上下文、受限工具集、只返回结论）；Claude Code / OpenCode 包装成工具（无头 CLI 流式输出，保存 session id 以便追问）；`todo` 工具；pre/post tool hooks（外部命令） | 上下文隔离、任务分解、多 agent 协作 |
 | | **M9 实验区（持续）** | `evals/`：真实任务加校验脚本，对比不同模型和 feature 开关；新 feature 通过开关接入，结论写进 notes | 用评测驱动迭代 |
 | | **W 个人 AI 工作台** | 桌面客户端 + 常驻后台引擎（本地 API、通知路由、客户端审批）。功能清单和客户端技术栈**待设计** | 客户端/服务端分离、事件推送 |
 
@@ -30,6 +30,12 @@ M8 的「外部 agent」提前做掉了一半（2026-09-17，随 W 里程碑）�
 **空间执行者**无头跑起来（`src/simpleagent/agents/`，事件流翻译成我们自己的帧，支持 resume 和取消），
 但**还没有**做成 `task` 工具、也没有实时审批（两家的无头模式都接不到我们的审批卡，现在只有
 只读 / 全放行两档，见 [design/client-ui.md 10.10](design/client-ui.md#1010-外部-cli-执行者claude-code--opencode-真正跑起来了)）。
+
+M8 第一部分「跨空间调度」已完成（2026-09-24）：指挥台里直接说任务，调度者（保留空间 `sp_command` 里的
+一个内置 loop 会话，只有 `propose_plan` / `dispatch` 两个工具）按空间简介挑空间派发，子任务是目标空间里的
+普通会话、跑完把结论交回来；跨空间先出计划卡等确认（代码层面强制），互不依赖的步骤并行。空间之间的信息只经
+调度者中转。空间设置里新增「简介」，可让模型自动摘要。方案与改动见 [design/command-dispatch.md](design/command-dispatch.md)。
+`task` 工具（会话内起子 agent）、`todo`、hooks 还没做。
 
 M4 进行中（2026-09-21 起），拆成 8 步：① 任务定义（`schedules.toml` + croniter + `sa schedule list`）✅
 → ② 跑一次任务（运行日志、`sa schedule run`）→ ③ 通知（inbox / macOS / 飞书 / Telegram + `notify` 工具）

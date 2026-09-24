@@ -72,6 +72,28 @@ def test_sse_resume_via_query(config, sa_home):
     assert first_ids({"x-query": "last_event_id=1", "last-event-id": "2"}, 1) == ["id: 3"]
 
 
+def test_session_messages_carry_seq(config, sa_home):
+    """GET /api/sessions/{id} 带上当前帧号：前端画完历史只订阅它之后的帧。
+
+    不带的话，页面在后台时打开会话、切回前台续传是 last_event_id=0，服务端会把
+    整段历史的帧重放一遍，叠在已经画好的历史上。
+    """
+    from simpleagent.serve.app import Server
+
+    store = SpaceStore(sa_home)
+    server = Server(config, store=store)
+    space = store.create_space(SpaceSpec(name="t", kind="generic", profile="a"))
+    meta = store.create_session(space.id)
+    assert server.handle("GET", f"/api/sessions/{meta.id}", {}, b"").body["seq"] == 0
+    for i in range(3):
+        server.runner.bus.publish(Frame(meta.id, "tick", {"i": i}))
+    body = server.handle("GET", f"/api/sessions/{meta.id}", {}, b"").body
+    assert body["seq"] == 3
+    # 从这个帧号续传：之前的不再重放，之后的照常收到
+    _, replay = server.runner.bus.subscribe(meta.id, str(body["seq"]))
+    assert replay == []
+
+
 # --------------------------------------------------------------- 2. 审批挂起 → 恢复
 async def test_approval_roundtrip():
     bus = EventBus()

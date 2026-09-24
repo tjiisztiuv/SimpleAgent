@@ -56,6 +56,9 @@ max_lines = 500     # 行数上限（两个上限都要满足）；完整内容�
 # [panel]
 # archive_after_minutes = 30   # 控制面板的消息点开后多久移进归档；没点开的不会自动归档
 
+# [command]
+# profile = "deepseek"   # 指挥台调度者用的模型，不填用 default_profile。它只负责把任务派给空间、汇总结果
+
 # ---------------------------------------------------------------- DeepSeek
 [profiles.deepseek]
 base_url = "https://api.deepseek.com"

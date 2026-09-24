@@ -226,6 +226,15 @@ class PanelConfig(BaseModel):
     archive_after_minutes: int = Field(30, ge=1)
 
 
+class CommandConfig(BaseModel):
+    """指挥台的调度者：把一句任务派给合适的空间，跨空间时先出计划等确认。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 调度者用哪个 profile；不填用 default_profile。它只做分派和汇总，不读写文件
+    profile: str | None = None
+
+
 # MCP server 名要拼进工具名 mcp__<server>__<tool>：不能有连续的下划线，也不能太长
 MCP_SERVER_NAME_RE = re.compile(r"[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*")
 MCP_SERVER_NAME_MAX = 24
@@ -308,6 +317,7 @@ class Config(BaseModel):
     trace: TraceConfig = Field(default_factory=TraceConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
+    command: CommandConfig = Field(default_factory=CommandConfig)
     # MCP server，按配置顺序启动；工具名是 mcp__<名字>__<工具>
     mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
@@ -315,6 +325,8 @@ class Config(BaseModel):
     def _check_default_profile(self) -> Config:
         if self.default_profile not in self.profiles:
             raise ValueError(f"default_profile '{self.default_profile}' 不在 profiles 中")
+        if self.command.profile and self.command.profile not in self.profiles:
+            raise ValueError(f"command.profile '{self.command.profile}' 不在 profiles 中")
         return self
 
     @field_validator("mcp_servers")

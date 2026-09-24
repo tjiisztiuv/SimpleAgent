@@ -22,6 +22,8 @@ from typing import Any
 from simpleagent.agents.base import SAFE
 from simpleagent.config import home_dir
 from simpleagent.spaces.models import (
+    COMMAND_SPACE_ID,
+    COMMAND_SPACE_NAME,
     DEFAULT_CLI_COMMAND,
     AgentBinding,
     GenericConfig,
@@ -30,6 +32,7 @@ from simpleagent.spaces.models import (
     SpaceSpec,
     VerifyConfig,
     _now,
+    clean_description,
     validate_executor,
 )
 
@@ -38,7 +41,7 @@ SPACES_DIRNAME = "spaces"
 DEFAULT_PERMISSION = "safe"
 # update_space 能逐个改的字段。「谁跑」那组（executor 等）不在这里，走 change_executor
 UPDATABLE_FIELDS = frozenset(
-    {"name", "profile", "opened", "pinned", "last_opened_at", "keep_sessions"}
+    {"name", "description", "profile", "opened", "pinned", "last_opened_at", "keep_sessions"}
 )
 
 
@@ -72,6 +75,8 @@ def _space_to_toml(space: Space) -> str:
         f"executor = {_toml_str(space.executor)}",
         f"profile = {_toml_str(space.profile)}",
     ]
+    if space.description:
+        out.insert(2, f"description = {_toml_str(space.description)}")
     if space.cli_model:
         out.append(f"cli_model = {_toml_str(space.cli_model)}")
     if space.executor != "simpleagent":
@@ -118,6 +123,7 @@ def _space_from_toml(data: dict[str, Any], space_id: str) -> Space:
         id=space_id,
         name=data.get("name", space_id),
         kind=data.get("kind", "generic"),
+        description=data.get("description", ""),
         executor=executor,
         profile=data.get("profile", "default"),
         cli_model=data.get("cli_model") or None,
@@ -212,6 +218,32 @@ class SpaceStore:
         self._write_space_toml(space)
         return space
 
+    def ensure_command_space(self) -> Space:
+        """指挥台调度者住的系统空间：不存在就建一个。`sa serve` 启动时调。
+
+        opened=False，左栏不显示；执行者固定是内置 loop（调度工具只有内置 loop 能用）。
+        用哪个模型不看这里的 profile，看 config.toml 的 [command]，改配置不用动这个文件。
+        """
+        space = self.get_space(COMMAND_SPACE_ID)
+        if space is not None:
+            return space
+        now = _now()
+        space = Space(
+            id=COMMAND_SPACE_ID,
+            name=COMMAND_SPACE_NAME,
+            kind="generic",
+            description="调度者：把指挥台收到的任务派给合适的空间，再汇总结果",
+            opened=False,
+            created_at=now,
+            last_opened_at=now,
+            generic=GenericConfig(tmp_dir="auto"),
+        )
+        sd = self._space_dir(space.id)
+        (sd / "tmp").mkdir(parents=True, exist_ok=True)
+        self._sessions_dir(space.id).mkdir(exist_ok=True)
+        self._write_space_toml(space)
+        return space
+
     def _write_space_toml(self, space: Space) -> None:
         _write_atomic(self._space_toml(space.id), _space_to_toml(space))
 
@@ -222,6 +254,8 @@ class SpaceStore:
         for k, v in fields.items():
             if k not in UPDATABLE_FIELDS:
                 raise ValueError(f"不能修改字段 {k}")
+            if k == "description":
+                v = clean_description(v)
             setattr(space, k, v)
         self._write_space_toml(space)
         return space
@@ -308,7 +342,10 @@ class SpaceStore:
         )
         return list(pinned) + running + others[:limit]
 
-    def create_session(self, space_id: str, agent: str | None = None) -> SessionMeta:
+    def create_session(
+        self, space_id: str, agent: str | None = None, *, parent: str | None = None
+    ) -> SessionMeta:
+        """parent：指挥台派发的子会话记下调度者的会话 id，面板靠它把卡片挂到调度者下面。"""
         space = self.get_space(space_id)
         if space is None:
             raise KeyError(f"空间不存在: {space_id}")
@@ -319,6 +356,7 @@ class SpaceStore:
             space_id=space_id,
             status="idle",
             agent=agent or space.executor,
+            parent_session_id=parent,
             created_at=now,
             updated_at=now,
         )

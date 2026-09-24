@@ -36,6 +36,8 @@ const state = {
   filter: "",
   tab: "chat",            // 当前右栏 tab
   editingSpace: null,     // 向导处于「空间设置」模式时是那个空间，新建时为 null
+  commandSpaceId: null,   // 指挥台调度者住的系统空间（/api/meta 给），左栏不显示
+  commandSpace: null,     // 它的详情：点进调度会话时，头部、日志要用
 };
 
 /* ────────────────────────────── 请求封装 ────────────────────────────── */
@@ -43,13 +45,13 @@ const state = {
    不报错、不超时，界面上就是「点了没反应」。给每个请求设个上限，至少变成看得见的错误。 */
 const REQ_TIMEOUT_MS = 20000;
 
-async function req(method, path, data) {
+async function req(method, path, data, timeoutMs = REQ_TIMEOUT_MS) {
   try {
     const r = await fetch(path, {
       method,
       headers: data === undefined ? {} : { "Content-Type": "application/json" },
       body: data === undefined ? undefined : JSON.stringify(data),
-      signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) {
       let msg = `${r.status}`;
@@ -68,7 +70,7 @@ async function req(method, path, data) {
 }
 const api = {
   get: (p) => req("GET", p),
-  post: (p, d) => req("POST", p, d),
+  post: (p, d, t) => req("POST", p, d, t),
   patch: (p, d) => req("PATCH", p, d),
   del: (p) => req("DELETE", p),
 };
@@ -206,6 +208,7 @@ function renderSpaces() {
       row.innerHTML = `
         <span class="st ${m.status}">${statusDot(m.status)}</span>
         <span class="title" title="${escapeHtml(m.title || "")}">${m.pinned ? "★ " : ""}${escapeHtml(m.title || "新会话")}</span>
+        ${m.parent_session_id ? `<span class="badge b-cmd" title="由指挥台派发">派</span>` : ""}
         ${lockBadge}
         <span class="vmark ${mcls}">${mk}</span>
         <span class="time">${relTime(m.updated_at || m.created_at)}</span>
@@ -292,9 +295,15 @@ function startRename(row, meta) {
   input.addEventListener("blur", () => finish(true));
 }
 
+/* 左栏的空间 + 指挥台的系统空间：后者左栏不显示，但点进调度会话时头部、日志、导出都要用它 */
+function findSpace(id) {
+  return state.spaces.find((s) => s.id === id)
+    || (state.commandSpace && state.commandSpace.id === id ? state.commandSpace : null);
+}
+
 /* ────────────────────────────── 右栏头部 ────────────────────────────── */
 function renderHeader() {
-  const sp = state.spaces.find((s) => s.id === state.spaceId);
+  const sp = findSpace(state.spaceId);
   const m = sp && (sp.sessions || []).find((x) => x.id === state.sessionId);
   $("ws-crumb").textContent = m ? `${sp.name} / ${m.title || "新会话"}` : (sp ? sp.name : "未选择会话");
 
@@ -448,18 +457,30 @@ function addErrorCard(text) {
   scrollDown();
 }
 
+/* 调度者的跨空间计划（propose_plan 的审批参数）按步骤渲染；解析不了就原样显示 */
+function planHtml(argsText) {
+  let plan = null;
+  try { plan = JSON.parse(argsText || "{}"); } catch { /* 原样显示 */ }
+  if (!plan || !Array.isArray(plan.steps)) return `<div class="card-body">${escapeHtml(argsText || "")}</div>`;
+  const steps = plan.steps.map((st) => `<li><b>${escapeHtml(st.space)}</b>：${escapeHtml(st.task)}${
+    (st.after || []).length ? `<span class="after">（等第 ${escapeHtml(st.after.join("、"))} 步做完）</span>` : ""}</li>`).join("");
+  return `<div class="plan">${plan.summary ? `<div class="plan-sum">${escapeHtml(plan.summary)}</div>` : ""}<ol>${steps}</ol></div>`;
+}
+
 function addApprovalCard(approvalId, toolName, argsText, reason) {
   const box = streamEl();
   const el = document.createElement("div");
   el.className = "card is-approval";
   el.dataset.approval = approvalId;
+  // 计划每次都要人看：不给「始终允许」
+  const isPlan = toolName === "propose_plan";
   el.innerHTML = `
-    <div><b>需要批准</b> · <code>${escapeHtml(toolName)}</code></div>
+    <div><b>${isPlan ? "确认执行计划" : "需要批准"}</b> · <code>${escapeHtml(toolName)}</code></div>
     ${reason ? `<div class="card-body">${escapeHtml(reason)}</div>` : ""}
-    <div class="card-body">${escapeHtml(argsText)}</div>
+    ${isPlan ? planHtml(argsText) : `<div class="card-body">${escapeHtml(argsText)}</div>`}
     <div style="margin-top:8px;display:flex;gap:6px">
-      <button class="btn btn-primary" data-act="allow">允许</button>
-      <button class="btn" data-act="always">本次会话始终允许</button>
+      <button class="btn btn-primary" data-act="allow">${isPlan ? "确认执行" : "允许"}</button>
+      ${isPlan ? "" : `<button class="btn" data-act="always">本次会话始终允许</button>`}
       <button class="btn" data-act="deny">拒绝</button>
     </div>`;
   el.querySelectorAll("button").forEach((b) => {
@@ -527,12 +548,15 @@ function closeStream() {
 
 /* resume=true 是续传：保留 lastSeq，让服务端只重放它之后的帧。
    EventSource 没法自己设 Last-Event-ID 头，所以用 query 传。 */
-function subscribe(sessionId, { resume = false } = {}) {
+function subscribe(sessionId, { resume = false, from = null } = {}) {
   closeStream();
-  if (!resume) state.lastSeq = 0;
+  // from：历史已经画到这一帧了（GET /api/sessions/{id} 给的 seq），只要这之后的帧。
+  // 不记的话，页面在后台时打开会话、切回前台续传会带 last_event_id=0，
+  // 服务端把整段历史的帧重放一遍，叠在已经画好的历史上（审批卡还会带着能点的按钮）
+  if (!resume) state.lastSeq = from ?? 0;
   // 后台标签页不占连接，等切回前台再连（见 boot 里的 visibilitychange）
   if (document.hidden) return;
-  const query = resume ? `?last_event_id=${state.lastSeq}` : "";
+  const query = resume || from !== null ? `?last_event_id=${state.lastSeq}` : "";
   const es = new EventSource(`/api/sessions/${sessionId}/events${query}`);
   state.es = es;
   for (const t of FRAME_TYPES) {
@@ -625,8 +649,16 @@ function updateUsage(u) {
 /* ────────────────────────────── 交互 ────────────────────────────── */
 async function loadSpaces() {
   state.spaces = await api.get("/api/spaces");
+  await loadCommandSpace();
   renderSpaces();
   renderHeader();
+}
+
+async function loadCommandSpace() {
+  if (!state.commandSpaceId) return;
+  try {
+    state.commandSpace = await api.get(`/api/spaces/${state.commandSpaceId}`);
+  } catch { /* 拿不到只影响调度会话的头部显示 */ }
 }
 
 async function refreshSessions() {
@@ -639,6 +671,7 @@ async function refreshSessions() {
       if (!fresh) return s;
       return state.showAll.has(s.id) ? { ...s, ...fresh, sessions: s.sessions } : fresh;
     });
+    await loadCommandSpace();
     renderSpaces();
     renderHeader();
   } catch { /* 刷新失败不影响当前会话 */ }
@@ -661,7 +694,7 @@ async function renderPendingApprovals(sessionId) {
 
 async function selectSession(spaceId, sessionId) {
   if (panelState.open) closePanel();
-  const sp = state.spaces.find((s) => s.id === spaceId);
+  const sp = findSpace(spaceId);
   const meta = sp && (sp.sessions || []).find((x) => x.id === sessionId);
   state.spaceId = spaceId;
   state.sessionId = sessionId;
@@ -671,15 +704,17 @@ async function selectSession(spaceId, sessionId) {
   $("status-hint").textContent = state.running ? "运行中…" : "";
   renderSpaces();
   renderHeader();
+  let seq = null;
   try {
     const data = await api.get(`/api/sessions/${sessionId}`);
     state.messages = data.messages || [];
     renderHistory(state.messages);
     scrollDown(true);
+    if (typeof data.seq === "number") seq = data.seq;
   } catch (e) {
     addErrorCard(`加载会话失败：${e.message}`);
   }
-  subscribe(sessionId);
+  subscribe(sessionId, { from: seq });
   await renderPendingApprovals(sessionId);
   // 停在非对话 tab 时切换会话，面板内容要跟着换
   if (state.tab && state.tab !== "chat") await switchTab(state.tab);
@@ -779,6 +814,7 @@ async function restoreDispatch(summary) {
       spaceId: r.space_id,
       spaceName: r.space_name,
       sessionId: r.session_id,
+      parentId: r.parent_session_id || null,  // 调度者派出的子任务：卡片挂到它下面
       at: Date.parse(r.updated_at) || 0,
       startedAt: null,  // 后台只记了 updated_at，不知道这一轮从哪一刻开始
       done: r.status !== "running",
@@ -800,7 +836,9 @@ async function restoreDispatch(summary) {
 
 /* 卡片第二行：终态写明「完成 / 已取消 / 出错」再跟摘要，状态不能只靠左边那条色带 */
 function dispatchLine(d, cls) {
-  if (d.approval) return `等待批准 ${d.approval.tool_name}`;
+  if (d.approval) {
+    return d.approval.tool_name === "propose_plan" ? "等你确认计划" : `等待批准 ${d.approval.tool_name}`;
+  }
   if (cls === "running") return "运行中…";
   const head = STATUS_TEXT[cls] || cls;
   const line = (d.summary || {}).line;
@@ -810,32 +848,53 @@ function dispatchLine(d, cls) {
 async function renderDispatch() {
   const box = $("dispatch-list");
   if (!panelState.dispatch.length) {
-    box.innerHTML = `<div class="empty-sub" style="padding:8px">24 小时内没有任务。试试「@${escapeHtml(
-      (state.spaces[0] || {}).name || "空间名")} 把 tests/ 下重复 fixture 提出来」</div>`;
+    box.innerHTML = `<div class="empty-sub" style="padding:8px">24 小时内没有任务。直接说要做什么，调度者会派给合适的空间；
+      也可以「@${escapeHtml((state.spaces[0] || {}).name || "空间名")} 任务」跳过调度者直接下发</div>`;
     return;
   }
-  box.innerHTML = panelState.dispatch.map((d, i) => {
+  // 调度者派出的子任务排在它那张卡下面；父卡不在列表里（超过 24 小时了）就当顶层显示
+  const ids = new Set(panelState.dispatch.map((d) => d.sessionId));
+  const kids = new Map();
+  const top = [];
+  for (const d of panelState.dispatch) {
+    if (d.parentId && ids.has(d.parentId)) {
+      if (!kids.has(d.parentId)) kids.set(d.parentId, []);
+      kids.get(d.parentId).push(d);
+    } else {
+      top.push(d);
+    }
+  }
+  const ordered = [];
+  for (const d of top) {
+    ordered.push([d, false]);
+    for (const k of (kids.get(d.sessionId) || []).sort((a, b) => a.at - b.at)) ordered.push([k, true]);
+  }
+  box.innerHTML = ordered.map(([d, child], i) => {
     const s = d.summary || {};
     const ap = d.approval;
+    const isPlan = ap && ap.tool_name === "propose_plan";
     const cls = ap ? "error" : (s.status || "idle");
     const when = d.finishedAt ? relTime(d.finishedAt)
       : d.startedAt ? fmtDur(Math.floor((Date.now() - d.startedAt) / 1000)) : "";
-    return `<div class="dispatch ${cls}" data-i="${i}">
+    const commander = d.spaceId === state.commandSpaceId;
+    return `<div class="dispatch ${cls}${child ? " child" : ""}" data-i="${i}">
       <div class="row1"><span class="dot ${cls}"></span>
+        ${child ? `<span class="arrow">↳</span>` : ""}
         <span class="who">${escapeHtml(d.spaceName)}</span>
+        ${commander ? `<span class="badge b-cmd" title="调度者：自动选空间派发">调度</span>` : ""}
         <span class="when">${escapeHtml(when)}</span></div>
       <div class="row2">${escapeHtml(s.title || "新会话")} · ${escapeHtml(dispatchLine(d, cls))}</div>
-      ${ap ? `<div class="row3">${escapeHtml(ap.arguments || "")}</div>
-        <div class="dispatch-actions">
-          <button class="btn btn-mini" data-act="ap-allow">允许</button>
-          <button class="btn btn-mini" data-act="ap-always">始终允许</button>
+      ${isPlan ? planHtml(ap.arguments) : ap ? `<div class="row3">${escapeHtml(ap.arguments || "")}</div>` : ""}
+      ${ap ? `<div class="dispatch-actions">
+          <button class="btn btn-mini" data-act="ap-allow">${isPlan ? "确认执行" : "允许"}</button>
+          ${isPlan ? "" : `<button class="btn btn-mini" data-act="ap-always">始终允许</button>`}
           <button class="btn btn-mini" data-act="ap-deny">拒绝</button>
         </div>` : ""}
       ${!ap && s.last_text ? `<div class="row3">${escapeHtml(s.last_text)}</div>` : ""}
     </div>`;
   }).join("");
   box.querySelectorAll(".dispatch").forEach((el) => {
-    const d = panelState.dispatch[Number(el.dataset.i)];
+    const d = ordered[Number(el.dataset.i)][0];
     el.querySelectorAll("[data-act^='ap-']").forEach((btn) => {
       btn.onclick = async (ev) => {
         ev.stopPropagation();
@@ -847,7 +906,6 @@ async function renderDispatch() {
       };
     });
     el.onclick = async () => {
-      const d = panelState.dispatch[Number(el.dataset.i)];
       closePanel();
       await selectSession(d.spaceId, d.sessionId);
     };
@@ -883,6 +941,11 @@ async function pollDispatch() {
   if (changed) {
     await loadInbox();
     await loadStatsOnly();
+    // 左栏的会话列表也跟着刷：调度者派出的子会话要出现在各自的空间下面
+    await refreshSessions();
+  } else if (panelState.dispatch.some((d) => !d.done && d.spaceId === state.commandSpaceId)) {
+    // 调度者跑着的时候随时会派出新的子任务：刷一下 summary，把它们的卡片补进来
+    await loadStatsOnly();
   }
 }
 
@@ -903,14 +966,20 @@ async function loadStatsOnly() {
   if (await restoreDispatch(panelState.summary)) renderDispatch();
 }
 
-/* 下发一条：@空间名 有任务描述就新建 session 跑；只 @ 就回一张状态卡 */
+/* 下发一条：
+   - 不以 @ 开头：交给指挥台的调度者，由它挑空间；跨空间时它会先出计划等你确认
+   - `@空间名 任务`：跳过调度者，直接在那个空间新建 session 跑；只 `@空间名` 回一张状态卡 */
 async function dispatch() {
   const input = $("dispatch-input");
   const text = input.value.trim();
   if (!text) return;
+  if (!text.startsWith("@")) {
+    await dispatchToCommander(text);
+    return;
+  }
   const t = parseTarget(text);
   if (!t) {
-    $("dispatch-hint").textContent = "要用 @空间名 开头，例如 @临时整理 清理下载目录";
+    $("dispatch-hint").textContent = "@ 后面要跟空间名，例如 @临时整理 清理下载目录";
     return;
   }
   if (!t.space) {
@@ -928,6 +997,7 @@ async function dispatch() {
       spaceId: t.space.id,
       spaceName: t.space.name,
       sessionId: m ? m.id : null,
+      parentId: null,
       at: Date.now(),
       startedAt: null,
       done: !m || m.status !== "running",
@@ -948,10 +1018,43 @@ async function dispatch() {
     spaceId: t.space.id,
     spaceName: t.space.name,
     sessionId: meta.id,
+    parentId: null,
     at: Date.now(),
     startedAt: Date.now(),
     done: false,
     summary: { title: t.rest.slice(0, 40), status: "running" },
+  });
+  renderDispatch();
+}
+
+/* 交给调度者：在指挥台的系统空间新建一个会话，把原话发过去。选空间、拆步骤都是它的事 */
+async function dispatchToCommander(text) {
+  const input = $("dispatch-input");
+  if (!state.commandSpaceId) {
+    $("dispatch-hint").textContent = "后端没有调度者（sa serve 太旧），先用 @空间名 直接下发";
+    return;
+  }
+  input.value = "";
+  $("dispatch-hint").textContent = "";
+  let meta;
+  try {
+    meta = await api.post(`/api/spaces/${state.commandSpaceId}/sessions`, {});
+    await api.post(`/api/sessions/${meta.id}/input`, { text });
+  } catch (e) {
+    input.value = text;  // 没发出去：把原话还给输入框，免得重打
+    $("dispatch-hint").textContent = `下发失败：${e.message}`;
+    return;
+  }
+  panelState.dispatch = panelState.dispatch.filter((d) => d.sessionId !== meta.id);
+  panelState.dispatch.unshift({
+    spaceId: state.commandSpaceId,
+    spaceName: (state.commandSpace || {}).name || "指挥台",
+    sessionId: meta.id,
+    parentId: null,
+    at: Date.now(),
+    startedAt: Date.now(),
+    done: false,
+    summary: { title: text.slice(0, 40), status: "running" },
   });
   renderDispatch();
 }
@@ -1297,7 +1400,7 @@ async function renderLogs() {
     return;
   }
   await refreshSessions();  // 拿最新的 usage / verification
-  const sp = state.spaces.find((s) => s.id === state.spaceId);
+  const sp = findSpace(state.spaceId);
   const m = sp && (sp.sessions || []).find((x) => x.id === state.sessionId);
   if (!m) {
     pane.innerHTML = `<div class="empty"><div class="empty-sub">找不到这个会话。</div></div>`;
@@ -1342,7 +1445,7 @@ async function rerun() {
 }
 
 function exportMarkdown() {
-  const sp = state.spaces.find((s) => s.id === state.spaceId);
+  const sp = findSpace(state.spaceId);
   const m = sp && (sp.sessions || []).find((x) => x.id === state.sessionId);
   if (!m) return;
   const lines = [`# ${m.title || "会话"}`, "", `> 空间：${sp.name}　导出时间：${new Date().toLocaleString("zh-CN")}`, ""];
@@ -1390,7 +1493,7 @@ async function runCommand(text) {
   if (cmd === "model") {
     if (!arg) { toast("用法：/model <profile>"); return; }
     if (!state.profiles.includes(arg)) { toast(`没有这个 profile：${arg}`); return; }
-    const cur = state.spaces.find((s) => s.id === state.spaceId);
+    const cur = findSpace(state.spaceId);
     if (cur && (cur.executor || "simpleagent") !== "simpleagent") {
       toast("这个空间绑的是外部 agent，模型由它自己的配置决定");
       return;
@@ -1469,6 +1572,9 @@ function openModal(sp) {
   $("f-kind").disabled = !!editing;
   $("f-cwd").disabled = !!editing;
   $("f-verify-wrap").classList.toggle("hidden", !!editing);
+  // 简介只在设置里填：刚建的空间没有会话、多半也没读到东西，自动生成没什么可写的
+  $("f-desc-wrap").classList.toggle("hidden", !editing);
+  $("f-desc").value = editing ? (editing.description || "") : "";
   $("modal-err").textContent = "";
   if (editing) {
     $("f-name").value = editing.name;
@@ -1559,7 +1665,8 @@ async function saveSpaceSettings() {
   btn.textContent = "保存中…";
   $("modal-err").textContent = "";
   try {
-    await api.patch(`/api/spaces/${sp.id}`, { name, ...executorFields() });
+    await api.patch(`/api/spaces/${sp.id}`,
+      { name, description: $("f-desc").value.trim(), ...executorFields() });
   } catch (e) {
     $("modal-err").textContent = `保存失败：${e.message}`;
     return;
@@ -1573,6 +1680,29 @@ async function saveSpaceSettings() {
     await loadSpaces();
   } catch (e) {
     toast(`已保存，但刷新列表失败：${e.message}`);
+  }
+}
+
+/* 让模型写一段简介，只填进文本框不保存：简介决定指挥台把任务派给谁，要人过目再存 */
+async function generateDescription() {
+  const sp = state.editingSpace;
+  const link = $("f-desc-gen");
+  if (!sp || link.dataset.busy) return;
+  link.dataset.busy = "1";
+  link.textContent = "生成中…";
+  $("modal-err").textContent = "";
+  try {
+    // 要调一次模型，后端最多等 60 秒：前端的超时放宽到比它长一点
+    const res = await api.post(`/api/spaces/${sp.id}/describe`, {}, 70000);
+    // 生成期间弹窗可能已经关了、或者换成了别的空间
+    if (state.editingSpace !== sp) return;
+    $("f-desc").value = res.description || "";
+    $("f-desc").focus();
+  } catch (e) {
+    if (state.editingSpace === sp) $("modal-err").textContent = `自动生成失败：${e.message}`;
+  } finally {
+    delete link.dataset.busy;
+    link.textContent = "自动生成";
   }
 }
 
@@ -1620,6 +1750,7 @@ async function boot() {
   state.profiles = meta.profiles || [];
   state.defaultProfile = meta.default_profile || state.profiles[0] || "";
   state.executors = meta.executors || [{ name: "simpleagent", label: "内置 SimpleAgent" }];
+  state.commandSpaceId = meta.command_space_id || null;
   fillExecutorOptions();
   await loadSpaces();
 
@@ -1629,6 +1760,7 @@ async function boot() {
     state.editingSpace = null;
   };
   $("f-create").onclick = createSpace;
+  $("f-desc-gen").onclick = generateDescription;
   $("f-kind").onchange = syncModalFields;
   $("f-executor").onchange = () => {
     fillExecutorDependents();
@@ -1746,7 +1878,7 @@ async function boot() {
   // 回到上次打开的会话（刷新页面不该丢上下文）
   try {
     const saved = JSON.parse(localStorage.getItem(LS_KEY) || "null");
-    const sp = saved && state.spaces.find((s) => s.id === saved.spaceId);
+    const sp = saved && findSpace(saved.spaceId);
     if (sp && (sp.sessions || []).some((m) => m.id === saved.sessionId)) {
       await selectSession(saved.spaceId, saved.sessionId);
     }
