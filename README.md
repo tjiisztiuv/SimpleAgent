@@ -75,6 +75,7 @@ sa sessions              # 列出已保存的会话
 REPL 里的命令：`/model [name]` 切模型、`/tools` 列工具、`/mcp` 看 MCP server 状态、`/usage` 看用量、
 `/context` 看上下文占用和构成、`/compact [重点]` 把早期对话压成摘要、`/memory` 看长期记忆、
 `/skills` 看技能、`/<技能名> [补充说明]` 调用技能、`/prompt` 看完整的 system prompt、`/clear` 清空历史、`/help`、`/exit`。
+输入 `/` 开头时按 Tab 补全命令名、技能名和 `/model`、`/debug` 的参数（按两下 Tab 列出候选）。
 要输入多行，单独一行敲 `"""` 开始，再敲一次 `"""` 结束；Ctrl+C 中断当前回复，Ctrl+D 退出。
 
 模型自己决定调哪个工具，终端里用灰色显示调用和结果预览。一轮对话最多请求模型 `max_steps` 次（默认 20），
