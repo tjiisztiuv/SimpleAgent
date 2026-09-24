@@ -28,6 +28,10 @@ agent loop、工具调用、权限、上下文都从零手写，只依赖 OpenAI
 
 ## 安装
 
+> **命令名冲突**：macOS 自带一个同名的 `/usr/sbin/sa`（系统记账统计）。装完敲 `sa --version` 如果看到
+> `illegal option` 和一行 `usage: sa [-abcd...]`，或者要在 cron、launchd 这类 PATH 很短的环境里用，
+> 就改用同时装好的长名字 `simple_agent`（和 `sa` 完全等价），或者写绝对路径 `~/.local/bin/sa`。
+
 用 [uv](https://docs.astral.sh/uv/) 从 GitHub 装成全局命令，之后在任意目录都能直接敲 `sa`（本机没有 Python 3.12 时 uv 会自动下载）：
 
 ```bash
@@ -41,10 +45,6 @@ sa --version                     # 确认装好了
   见下面「开发」一节的隔离方式
 - 卸载：`uv tool uninstall simpleagent`（`~/.simpleagent/` 里的配置和会话不会删）
 - 命令装在 `~/.local/bin/`；不在 PATH 里的话执行一次 `uv tool update-shell`
-
-同时会装一个长名字 `simple_agent`，和 `sa` 完全等价。macOS 自带一个 `/usr/sbin/sa`（系统记账统计），
-平时 `~/.local/bin` 排在 PATH 前面没问题；但 launchd、cron 这类 PATH 很短的环境会找到系统那个，
-这时写绝对路径 `~/.local/bin/sa`，或者用 `simple_agent`。
 
 不想装也可以：在仓库目录下 `uv sync` 后用 `uv run sa` 代替下面所有的 `sa`（这时是开发模式，数据目录是 `~/.simpleagent-dev/`）。
 
