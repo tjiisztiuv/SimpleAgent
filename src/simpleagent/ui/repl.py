@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
@@ -45,6 +46,7 @@ from simpleagent.permissions import Approver, Policy
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
 from simpleagent.ui.approve import ConsoleApprover
+from simpleagent.ui.complete import SlashCompleter, install_completer
 from simpleagent.ui.debug import (
     DEBUG_LEVELS,
     DebugRenderer,
@@ -60,22 +62,42 @@ except ImportError:  # pragma: no cover
 
 DIM, RED, BOLD, RESET = "\033[2m", "\033[31m", "\033[1m", "\033[0m"
 
-HELP = '''命令：
-  /model [name]   查看或切换模型 profile（对话历史保留）
-  /tools          列出当前可用的工具
-  /mcp            查看 MCP server 的状态（连上没有、几个工具、重启过几次）
-  /debug [LEVEL]  查看或切换 debug：off / on / verbose / full（过程输出走 stderr）
-  /clear          清空对话历史
-  /usage          本会话的 token 用量
-  /context        上下文占了多少、离上限还有多远、由哪些部分构成
-  /compact [重点]  把早期对话压成摘要，只留最后一轮原文；可以说明要保留的重点
-  /memory         长期记忆：索引内容、存在哪、和本会话开始时比有没有变
-  /skills         可用的技能和它们的来源；/<技能名> [补充说明] 直接调用一个技能
-  /prompt         打印本会话的 system prompt（项目指令、记忆索引、技能列表都在里面）
-  /help           显示帮助
-  /exit           退出
-多行输入：单独一行输入 """ 开始，再输入 """ 结束。
-Ctrl+C 中断当前回复，Ctrl+D 退出。'''
+# 内置命令：名字 → (参数, 说明)。/help 和 Tab 补全都从这里取，新增命令记得加一行
+COMMANDS: dict[str, tuple[str, str]] = {
+    "model": ("[name]", "查看或切换模型 profile（对话历史保留）"),
+    "tools": ("", "列出当前可用的工具"),
+    "mcp": ("", "查看 MCP server 的状态（连上没有、几个工具、重启过几次）"),
+    "debug": ("[LEVEL]", "查看或切换 debug：off / on / verbose / full（过程输出走 stderr）"),
+    "clear": ("", "清空对话历史"),
+    "usage": ("", "本会话的 token 用量"),
+    "context": ("", "上下文占了多少、离上限还有多远、由哪些部分构成"),
+    "compact": ("[重点]", "把早期对话压成摘要，只留最后一轮原文；可以说明要保留的重点"),
+    "memory": ("", "长期记忆：索引内容、存在哪、和本会话开始时比有没有变"),
+    "skills": ("", "可用的技能和它们的来源；/<技能名> [补充说明] 直接调用一个技能"),
+    "prompt": ("", "打印本会话的 system prompt（项目指令、记忆索引、技能列表都在里面）"),
+    "help": ("", "显示帮助"),
+    "exit": ("", "退出"),
+}
+
+
+def _pad(text: str, width: int) -> str:
+    """按终端里的显示宽度补空格（中文占两格），至少留一个空格。"""
+    used = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+    return text + " " * max(width - used, 1)
+
+
+HELP = "\n".join(
+    [
+        "命令：",
+        *(
+            f"  {_pad(f'/{name} {args}'.rstrip(), 16)}{desc}"
+            for name, (args, desc) in COMMANDS.items()
+        ),
+        "按 Tab 补全命令名、技能名和 /model、/debug 的参数。",
+        '多行输入：单独一行输入 """ 开始，再输入 """ 结束。',
+        "Ctrl+C 中断当前回复，Ctrl+D 退出。",
+    ]
+)
 
 TOOL_PREVIEW_LINES = 5  # 工具结果在终端里预览的行数；完整内容在 trace 里
 
@@ -308,10 +330,13 @@ class Repl:
             self.print(f"debug：{self.debug}，API 与工具调用的过程输出走 stderr", DIM)
         if summary := self.knowledge.summary():
             self.print(summary, DIM)
+        # 测试会注入 input_fn，这时不碰进程级的 readline；输入不是终端（管道）时补全也用不上
+        if self.input_fn is input and sys.stdin.isatty():
+            install_completer(self.completer())
         with asyncio.Runner() as runner:
             try:
                 self._start_mcp(runner)
-                self.print("输入 /help 查看命令", DIM)
+                self.print("输入 /help 查看命令，Tab 补全", DIM)
                 while True:
                     try:
                         line = self._read_input()
@@ -332,6 +357,13 @@ class Repl:
                 runner.run(self.mcp.close())
                 runner.run(self.agent.llm.close())
         return 0
+
+    def completer(self) -> SlashCompleter:
+        """/ 开头按 Tab 补全的候选：内置命令 + 技能；/model、/debug 还补第一个参数。"""
+        return SlashCompleter(
+            [*COMMANDS, *self.knowledge.skills.skills],
+            {"model": self.config.profiles, "debug": DEBUG_LEVELS},
+        )
 
     def _start_mcp(self, runner: asyncio.Runner) -> None:
         """启动配置里的 MCP server，把它们的工具注册进来。等全部有结果再接受第一个问题：
@@ -422,7 +454,7 @@ class Repl:
         match name:
             case "exit" | "quit":
                 return False
-            case "help":
+            case "help" | "":  # 只输入一个 / 也显示帮助
                 self.print(HELP)
             case "clear":
                 # 走 truncate 才会写进 JSONL；直接清列表的话，--resume 之后历史又回来了

@@ -326,6 +326,7 @@ class SpaceStore:
 | POST | `/api/sessions/{id}/input` | 发一条用户输入，触发 run（202） |
 | POST | `/api/sessions/{id}/rerun` | 用最后一条用户消息再跑一次 |
 | GET | `/api/spaces/{id}/files` | 工作目录文件树（两层，右栏「文件」tab） |
+| GET | `/api/spaces/{id}/commands` | 输入框 `/` 菜单要列的技能（只有内置 loop 的普通空间有；见 design/slash-completion.md） |
 | POST | `/api/sessions/{id}/verify` | 手动跑验证 |
 | PATCH | `/api/sessions/{id}` | 重命名 / 置顶（`title` / `pinned`） |
 | PATCH | `/api/sessions/{id}/verification` | 手动标记已验证 |

@@ -407,7 +407,10 @@ pre.code {
 .cursor { display: inline-block; width: 6px; background: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
-.composer { background: var(--panel); border-top: 1px solid var(--border); padding: 10px 16px 12px; }
+.composer {
+  position: relative;  /* / 补全菜单贴着它的上沿弹出 */
+  background: var(--panel); border-top: 1px solid var(--border); padding: 10px 16px 12px;
+}
 #input {
   width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: var(--radius);
   padding: 8px 10px; font: inherit; color: var(--text); background: var(--panel-2); outline: none;
@@ -415,6 +418,15 @@ pre.code {
 #input:focus { border-color: var(--accent); background: #fff; }
 #input:disabled { background: var(--bg); }
 .composer-bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+/* / 补全菜单：外观沿用指挥台的 @ 菜单（.mentions），左右和输入框对齐 */
+.slash-menu { left: 16px; right: 16px; max-height: 260px; }
+.slash-item { font-size: 12.5px; padding: 6px 10px; }
+.slash-label { font-family: var(--mono); font-weight: 600; white-space: nowrap; }
+.slash-hint { font-family: var(--mono); color: var(--text-3); white-space: nowrap; }
+.slash-desc {
+  flex: 1; min-width: 0; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .select {
   padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--panel); font-size: 12px; color: var(--text);
