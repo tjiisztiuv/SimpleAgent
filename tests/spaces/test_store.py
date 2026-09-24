@@ -361,3 +361,24 @@ def test_meta_readers_never_see_partial_write(tmp_path: Path):
         t.join()
     assert errors == []
     assert list((tmp_path / "spaces" / sp.id / "sessions").glob("*.tmp")) == []
+
+
+def test_description_roundtrip_and_update(tmp_path: Path):
+    """简介进 space.toml：引号、换行都要能原样读回（换行拍平成一行），老文件没有这一行也能读。"""
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="理财", kind="generic"))
+    assert sp.description == ""
+    assert "description" not in (tmp_path / "spaces" / sp.id / "space.toml").read_text()
+
+    st.update_space(sp.id, description='  管 "记账" 数据\n只读分析\x07  ')
+    # 控制字符（\x07）换成空格：TOML 字符串不许有它，写进去整个空间就读不回来了
+    again = SpaceStore(home=tmp_path).get_space(sp.id)
+    assert again.description == '管 "记账" 数据 只读分析'
+
+
+def test_description_too_long_rejected(tmp_path: Path):
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="x", kind="generic"))
+    with pytest.raises(ValueError, match="最多 200 字"):
+        st.update_space(sp.id, description="字" * 201)
+    assert st.get_space(sp.id).description == ""

@@ -24,7 +24,14 @@ from simpleagent.panel.summary import one_line, summarize
 from simpleagent.serve.bus import frame_to_sse
 from simpleagent.serve.runner import Runner
 from simpleagent.serve.static import asset_bytes
-from simpleagent.spaces.models import EXECUTOR_LABELS, EXECUTORS, SpaceSpec, locked_reason
+from simpleagent.spaces.describe import DescribeError
+from simpleagent.spaces.models import (
+    COMMAND_SPACE_ID,
+    EXECUTOR_LABELS,
+    EXECUTORS,
+    SpaceSpec,
+    locked_reason,
+)
 from simpleagent.spaces.store import UPDATABLE_FIELDS, SpaceStore
 from simpleagent.tools.walk import IGNORED_DIRS
 
@@ -37,6 +44,8 @@ KEEPALIVE_INTERVAL = 15.0
 RECENT_DONE_LIMIT = 10
 RECENT_DONE_WINDOW_MINUTES = 24 * 60
 FINAL_STATUSES = frozenset({"done", "error", "cancelled"})
+# 自动生成空间简介最多等多久：一次不带工具的短请求，正常几秒就回来
+DESCRIBE_TIMEOUT = 60.0
 
 
 def _within_window(ts: str, cutoff: float) -> bool:
@@ -84,6 +93,8 @@ class Server:
         self.runner = runner or Runner(config, store=self.store, llm_factory=llm_factory)
 
     def start(self) -> None:
+        # 指挥台的调度者住在保留空间里，前端一打开就可能往里建会话，先建好
+        self.store.ensure_command_space()
         self.runner.start()
 
     # ------------------------------------------------------------------- 路由
@@ -121,6 +132,9 @@ class Server:
         m = re.match(r"^/api/spaces/([^/]+)/files$", path_only)
         if m and method == "GET":
             return self._space_files(m.group(1))
+        m = re.match(r"^/api/spaces/([^/]+)/describe$", path_only)
+        if m and method == "POST":
+            return self._describe_space(m.group(1))
         m = re.match(r"^/api/sessions/([^/]+)$", path_only)
         if m and method == "GET":
             return self._session_messages(m.group(1))
@@ -225,6 +239,8 @@ class Server:
                 "default_profile": self.config.default_profile,
                 "executors": executors,
                 "max_steps": self.config.max_steps,
+                # 指挥台不带 @ 的输入交给这个空间里的调度者
+                "command_space_id": COMMAND_SPACE_ID,
             },
         )
 
@@ -285,6 +301,11 @@ class Server:
         current = self.store.get_space(space_id)
         if current is None:
             return Response(404, {"error": "space not found"})
+        if space_id == COMMAND_SPACE_ID:
+            # 执行者只能是内置 loop，模型在 config.toml 的 [command] 里配，这里没有可改的
+            return Response(
+                400, {"error": "指挥台是系统空间，模型在 config.toml 的 [command] 里配"}
+            )
         profile = data.get("profile")
         if profile is not None and profile not in self.config.profiles:
             return Response(
@@ -325,7 +346,27 @@ class Server:
             return Response(400, {"error": str(e)})
         return Response(200, self._space_view(space))
 
+    def _describe_space(self, space_id: str) -> Response:
+        """让模型给空间写一段简介，**不保存**：前端把它填进设置里的文本框，人改完再 PATCH。"""
+        if self.store.get_space(space_id) is None:
+            return Response(404, {"error": "space not found"})
+        future = self.runner.describe(space_id)
+        try:
+            text = future.result(timeout=DESCRIBE_TIMEOUT)
+        except TimeoutError:
+            future.cancel()
+            return Response(504, {"error": "生成超时，稍后再试，或者先手写一句"})
+        except KeyError:
+            return Response(404, {"error": "space not found"})
+        except ValueError as e:
+            return Response(400, {"error": str(e)})
+        except DescribeError as e:
+            return Response(502, {"error": f"生成失败：{e}"})
+        return Response(200, {"description": text})
+
     def _delete_space(self, space_id: str) -> Response:
+        if space_id == COMMAND_SPACE_ID:
+            return Response(400, {"error": "指挥台是系统空间，不能删除"})
         self.store.delete_space(space_id)
         return Response(200, {"deleted": space_id})
 
@@ -359,7 +400,9 @@ class Server:
         if space_id is None:
             return Response(404, {"error": "session not found"})
         session = self.store.load_session(space_id, session_id)
-        return Response(200, {"session_id": session_id, "messages": session.messages})
+        # 读完历史之后的帧号：前端画完这段历史，只订阅它之后的帧，不会把历史再放一遍
+        seq = self.runner.bus.next_seq(session_id) - 1
+        return Response(200, {"session_id": session_id, "messages": session.messages, "seq": seq})
 
     def _update_session(self, session_id: str, body: bytes) -> Response:
         """改会话的可变元信息：目前开放重命名（title）与置顶（pinned）。"""
@@ -502,6 +545,8 @@ class Server:
                     "status": meta.status,
                     "updated_at": meta.updated_at,
                     "verification": _verification_status(meta),
+                    # 指挥台派发的子会话：面板把它的卡片挂在调度者那张卡下面
+                    "parent_session_id": meta.parent_session_id,
                 }
                 if meta.status == "running":
                     running.append(item)
@@ -532,6 +577,7 @@ class Server:
         summary["space_id"] = space_id
         summary["title"] = meta.title if meta else ""
         summary["status"] = meta.status if meta else "idle"
+        summary["parent_session_id"] = meta.parent_session_id if meta else None
         summary["line"] = one_line(summary)
         return Response(200, summary)
 

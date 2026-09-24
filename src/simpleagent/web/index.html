@@ -67,10 +67,10 @@
       <div class="panel-grid">
         <section class="panel-card panel-console">
           <div class="panel-head">指挥台
-            <span class="panel-sub">@空间名 下发任务，只 @ 则查看状态</span></div>
+            <span class="panel-sub">说任务自动派发 · @空间名 直派</span></div>
           <div class="panel-body" id="dispatch-list"></div>
           <div class="panel-foot">
-            <textarea id="dispatch-input" rows="2" placeholder="@空间名 任务描述…（输入 @ 出候选）"></textarea>
+            <textarea id="dispatch-input" rows="2" placeholder="要做什么？调度者会派给合适的空间，跨空间先给你看计划（@空间名 开头 = 直接下发）"></textarea>
             <div class="composer-bar">
               <div id="dispatch-hint" class="hint"></div>
               <button id="btn-dispatch" class="btn btn-primary">下发</button>
@@ -113,6 +113,12 @@
   <div class="modal-card">
     <div class="modal-head" id="modal-title">新建空间</div>
     <label class="field"><span>名称</span><input id="f-name" placeholder="例如：整理下载目录"></label>
+    <div class="field hidden" id="f-desc-wrap">
+      <div class="field-label"><span>简介</span>
+        <span class="link" id="f-desc-gen" title="读工作目录的 AGENTS.md / README 和最近的会话标题，让模型写一段">自动生成</span></div>
+      <textarea id="f-desc" rows="3" maxlength="200"
+        placeholder="这个空间负责什么，50～100 字。指挥台靠它决定把任务派给谁"></textarea>
+    </div>
     <label class="field"><span>任务形态</span>
       <select id="f-kind">
         <option value="generic">通用任务（自动分配 tmp 目录）</option>

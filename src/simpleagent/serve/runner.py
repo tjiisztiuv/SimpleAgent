@@ -10,6 +10,8 @@
 - 持有一个 McpManager：MCP server 在后台事件循环里启动一次，所有空间、所有会话共用。
 - 每个会话第一次跑时读一次项目指令、记忆索引、技能清单（M7），连同拼好的 system prompt 记下来，
   之后每轮都用这一份：Agent 每轮新建，system prompt 要是每轮重拼，中途改个记忆就整段缓存失效。
+- 指挥台（保留空间 sp_command）的会话走调度者：只有 propose_plan / dispatch 两个工具，
+  dispatch 通过 `run_child` 在目标空间新建子会话、等它跑完，把结论交回调度者（见 command/）。
 
 线程模型：Runner 自己起一个线程跑 asyncio 事件循环；HTTP 层在另一个线程，通过
 run_coroutine_threadsafe / call_soon_threadsafe 与它通信，两者用总线（线程安全）解耦。
@@ -33,11 +35,13 @@ from simpleagent.agent.loop import Agent
 from simpleagent.agent.prompt import build_system_prompt
 from simpleagent.agent.session import Session
 from simpleagent.agents import adapter_for
+from simpleagent.command import ChildResult, command_prompt, command_tools
 from simpleagent.config import TOOL_OUTPUT_DIRNAME, Config, home_dir
 from simpleagent.events import Event, MessageDone, ToolResult
 from simpleagent.knowledge import Knowledge
 from simpleagent.mcp.manager import McpManager
 from simpleagent.panel.store import PanelStore
+from simpleagent.panel.summary import summarize
 from simpleagent.permissions import Policy
 from simpleagent.serve.approval import APIApprover, ApprovalDecision, PendingApprovals
 from simpleagent.serve.bus import EventBus
@@ -47,7 +51,8 @@ from simpleagent.serve.frames import (
     status_frame,
     verification_frame,
 )
-from simpleagent.spaces.models import Space, locked_reason
+from simpleagent.spaces.describe import TITLE_LIMIT, DescribeError, describe_space, gather_material
+from simpleagent.spaces.models import COMMAND_SPACE_ID, Space, locked_reason
 from simpleagent.spaces.store import SpaceStore
 from simpleagent.spaces.verify import changed_since, fingerprint
 from simpleagent.tools import ToolRegistry, builtin_tools
@@ -113,6 +118,9 @@ class Runner:
         self._mcp_started: concurrent.futures.Future[None] | None = None
         # 会话 id → (会话开始时读到的 Knowledge, 拼好的 system prompt)。serve 重启后重新读
         self._prompts: dict[str, tuple[Knowledge, str]] = {}
+        # 调度者正在等的子会话 → 这一轮的收口状态和失败原因（还没收口是 None）。
+        # run_child 先登记、_finalize 只填登记过的、run_child 最后取走：普通会话不进来，不会越攒越多
+        self._outcomes: dict[str, tuple[str, str | None] | None] = {}
 
     # ----------------------------------------------------------------- 生命周期
     def start(self) -> None:
@@ -224,6 +232,66 @@ class Runner:
 
     def verify(self, space_id: str, session_id: str) -> None:
         self._schedule(self._verify(space_id, session_id))
+
+    def describe(self, space_id: str) -> concurrent.futures.Future[str]:
+        """自动生成空间简介（HTTP 层等它的结果）。模型调用要在后台循环里跑，所以返回 Future。"""
+        assert self._loop is not None
+        return asyncio.run_coroutine_threadsafe(self._describe(space_id), self._loop)
+
+    # --------------------------------------------------------- 指挥台调度（Dispatcher）
+    def targets(self) -> list[Space]:
+        """调度者能派的空间：左栏打开着的那些，不含指挥台自己。关掉的空间不派。"""
+        return [s for s in self.store.list_spaces(opened_only=True) if s.id != COMMAND_SPACE_ID]
+
+    async def run_child(self, space_id: str, task: str, *, parent: str) -> ChildResult:
+        """在目标空间新建子会话跑 task，等它收口后把结论交回调度者。
+
+        子会话单独起一个 asyncio 任务再等它，不能直接 await _run_input：它用 current_task()
+        把自己登记进 _tasks，直接 await 的话登记的是调度者的任务，取消子会话会连调度者一起取消。
+        外面套 shield：调度者被取消时，不让 CancelledError 直接打进子任务——外部 CLI 的子进程
+        得靠 cancel() 杀进程组才收得干净，直接取消任务会把进程留在后台。
+        """
+        space = self.store.get_space(space_id)
+        name = space.name if space else space_id
+        meta = self.store.create_session(space_id, parent=parent)
+        self._outcomes[meta.id] = None
+        child = asyncio.create_task(self._run_input(space_id, meta.id, task))
+        try:
+            await asyncio.shield(child)
+        except asyncio.CancelledError:
+            # 调度者被取消：子任务跟着停。外部 CLI 杀进程组，内置 loop 直接取消它的任务
+            if meta.id in self._procs:
+                self.cancel(meta.id)
+            else:
+                child.cancel()
+            await asyncio.wait({child})
+            raise
+        finally:
+            outcome = self._outcomes.pop(meta.id, None)
+        status, reason = outcome or ("error", "子会话没有跑起来")
+        final = self.store.get_session_meta(space_id, meta.id)
+        messages = self.store.load_session(space_id, meta.id).messages
+        facts = summarize(messages, final)
+        reply = next(
+            (
+                str(m["content"]).strip()
+                for m in reversed(messages)
+                if m.get("role") == "assistant"
+                and isinstance(m.get("content"), str)
+                and m["content"].strip()
+            ),
+            "",
+        )
+        return ChildResult(
+            space_id=space_id,
+            space_name=name,
+            session_id=meta.id,
+            status=status,
+            reply=reply,
+            reason=reason,
+            files=facts["files"],
+            verification=facts["verification"],
+        )
 
     # --------------------------------------------------------------- 内部实现
     async def _run_input(self, space_id: str, session_id: str, user_input: str) -> None:
@@ -345,6 +413,8 @@ class Runner:
         """
         usage = session.usage.__dict__
         self.store.update_meta(space_id, session_id, status=status, usage=usage)
+        if session_id in self._outcomes:  # 调度者在等它：把结果留给 run_child
+            self._outcomes[session_id] = (status, reason)
         extra: dict[str, Any] = {"space_id": space_id, "usage": usage}
         if reason is not None:
             extra["reason"] = reason
@@ -490,6 +560,8 @@ class Runner:
             raise RuntimeError(
                 f"{executor} 要走 CLI 路径（_run_cli），_build_agent 只服务内置 loop"
             )
+        if space.id == COMMAND_SPACE_ID:
+            return self._build_commander(space, session)
         if space.profile not in self.config.profiles:
             raise RuntimeError(
                 f"空间用的 profile「{space.profile}」不在 config.toml 里，"
@@ -520,6 +592,41 @@ class Runner:
             context=self.config.context,
         )
 
+    def _build_commander(self, space: Space, session: Session) -> Agent:
+        """指挥台的调度者：只有 propose_plan / dispatch，没有文件工具、记忆、技能、MCP。
+
+        模型看 config.toml 的 [command].profile（不填用默认 profile），不看空间自己的 profile。
+        工具每轮新造：「本轮派过哪些空间、批准过什么计划」只在这一轮有效。
+        审批器给一份独立的「始终允许」记录：计划每次都要人看，不能被一次「始终允许」放过去。
+        """
+        name = self.config.command.profile or self.config.default_profile
+        llm = self.llm_factory(name, self.config.profiles[name])
+        cached = self._prompts.get(session.id)
+        if cached is None:
+            # 空间清单在会话开始时拼一次，之后不变（前缀缓存）。Knowledge 为空：
+            # _run_input 要拿它展开 /技能名，调度者没有技能
+            cached = (Knowledge(), command_prompt(self.targets()))
+            self._prompts[session.id] = cached
+        approver = APIApprover(self.bus, self.pending, {})
+        tools = ToolRegistry(
+            command_tools(self, parent=session.id, approver=approver),
+            max_output_chars=self.config.tool_output.max_chars,
+            max_output_lines=self.config.tool_output.max_lines,
+        )
+        tools.approver = approver
+        cwd = self.cwd_for(space)
+        tools.policy = Policy(cwd)
+        return Agent(
+            llm=llm,
+            tools=tools,
+            system_prompt=cached[1],
+            cwd=cwd,
+            max_steps=self.config.max_steps,
+            output_dir=home_dir() / TOOL_OUTPUT_DIRNAME,
+            hidden_env=self.config.api_key_env_names(),
+            context=self.config.context,
+        )
+
     def _session_prompt(self, session_id: str, cwd: Path) -> tuple[Knowledge, str]:
         """这个会话的 Knowledge 和 system prompt：第一次用到时读、拼，之后原样复用。
 
@@ -543,6 +650,29 @@ class Runner:
         if space.cwd:
             return Path(space.cwd).expanduser()
         return self.store._space_dir(space.id) / "tmp"
+
+    async def _describe(self, space_id: str) -> str:
+        """读空间的目录和最近的会话标题，让默认 profile 写一段简介。不保存，由人改完再存。
+
+        素材为空抛 ValueError（HTTP 400）；模型那边出错抛 DescribeError（HTTP 502）。
+        """
+        space = self.store.get_space(space_id)
+        if space is None:
+            raise KeyError(f"空间不存在: {space_id}")
+        metas = self.store.list_sessions(space_id, limit=TITLE_LIMIT, include_pinned=False)
+        material = gather_material(space, self.cwd_for(space), [m.title for m in metas])
+        if material is None:
+            raise ValueError("这个空间还没有会话，目录里也没有东西可读，先手写一句")
+        # 统一用默认 profile：外部 CLI 空间没有我们的 profile，口径简单
+        name = self.config.default_profile
+        try:
+            llm = self.llm_factory(name, self.config.profiles[name])
+        except Exception as e:  # noqa: BLE001  没配 key 之类，和 API 报错一样当生成失败
+            raise DescribeError(f"{type(e).__name__}: {e}") from e
+        try:
+            return await describe_space(llm, material)
+        finally:
+            await llm.close()
 
     async def _verify(self, space_id: str, session_id: str) -> None:
         space = self.store.get_space(space_id)

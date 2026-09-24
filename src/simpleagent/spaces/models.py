@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import UTC
 from typing import Any, Literal
@@ -34,6 +35,35 @@ EXECUTOR_LABELS = {
 }
 # 外部 CLI 默认拉起的可执行文件；space.toml 的 [agent].command 可以覆盖
 DEFAULT_CLI_COMMAND = {"claude-code": "claude", "opencode": "opencode"}
+
+# 指挥台的调度者住在这个保留空间里（左栏不显示）。它的会话就是一次次调度，
+# 派出去的子会话落在各自的目标空间，meta 里记着 parent_session_id 指回来
+COMMAND_SPACE_ID = "sp_command"
+COMMAND_SPACE_NAME = "指挥台"
+
+
+# 空间简介的上限：每个空间的简介都进调度者的 system prompt，每次请求都要带上
+DESCRIPTION_MAX = 200
+
+
+def one_line(text: str) -> str:
+    """控制字符换成空格、连续空白（含换行）拍平成一个空格、去掉首尾空白。
+
+    控制字符要去掉：TOML 字符串里不许有，写进 space.toml 就读不回来，整个空间会从列表里消失。
+    """
+    text = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in str(text or ""))
+    return " ".join(text.split())
+
+
+def clean_description(text: str) -> str:
+    """整理空间简介（拍平成一行）；超长直接报错（API 层转 400）。
+
+    报错而不是悄悄截断：简介决定任务派给谁，截掉的半句话可能正是关键。
+    """
+    text = one_line(text)
+    if len(text) > DESCRIPTION_MAX:
+        raise ValueError(f"简介最多 {DESCRIPTION_MAX} 字，现在 {len(text)} 字")
+    return text
 
 
 def locked_reason(session_executor: str, space_executor: str) -> str:
@@ -163,6 +193,8 @@ class SessionMeta:
     pinned: bool = False
     agent: str = "simpleagent"
     agent_session_id: str | None = None
+    # 由指挥台派发的子会话：指回调度者的那个会话。创建时定下，之后不变
+    parent_session_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
     usage: dict[str, int] = field(default_factory=dict)
@@ -181,6 +213,7 @@ class SessionMeta:
             pinned=d.get("pinned", False),
             agent=d.get("agent", "simpleagent"),
             agent_session_id=d.get("agent_session_id"),
+            parent_session_id=d.get("parent_session_id"),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
             usage=d.get("usage", {}) or {},
@@ -218,6 +251,7 @@ class Space:
     id: str
     name: str
     kind: Literal["generic", "agent"]  # 只管目录形态：generic 用 tmp，agent 进 cwd
+    description: str = ""  # 这个空间负责什么：指挥台的调度者靠它决定把任务派给谁
     executor: str = "simpleagent"  # 只管谁跑：simpleagent | claude-code | opencode
     profile: str = "default"  # executor=simpleagent 时的模型
     cli_model: str | None = None  # 外部 CLI 的模型 preset；None = 用本机默认配置

@@ -382,6 +382,9 @@ src/simpleagent/
   knowledge/instructions.py ✅ AGENTS.md 查找（个人 → git 根 → … → cwd，CLAUDE.md 兜底）、字数预算
   knowledge/memory.py     ✅ MemoryStore（每条一个文件、索引按行维护、原子写）、memory_read/write/delete
   knowledge/skills.py     ✅ SKILL.md 发现（先到先得、同名覆盖记录）、load_skill、/技能名 展开
+  command/                ✅ 指挥台调度者：调度 prompt（空间清单）、propose_plan / dispatch 工具、
+                          ✅ Dispatcher 协议（Runner 实现 run_child）（M8 第一部分，见 design/command-dispatch.md）
+  spaces/describe.py      ✅ 空间简介的自动摘要：读 AGENTS.md / README / 顶层文件 / 会话标题，调一次模型
   ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp，M6 起有 /context、/compact，
                           ✅ M7 起有 /memory、/skills、/prompt 和 /<技能名>）
   ui/headless.py          ✅ `sa run`：无人值守单次执行，白名单审批
