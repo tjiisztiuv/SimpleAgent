@@ -286,10 +286,14 @@ def test_pending_approvals_carry_details(config, sa_home):
 
 
 def test_pinned_session_stays_on_top(config, sa_home):
+    import time
+
     store = SpaceStore(sa_home)
     space = store.create_space(SpaceSpec(name="t", kind="generic", profile="a"))
     old = store.create_session(space.id)
     for _ in range(5):
+        # updated_at 只到毫秒，连着建会撞同一毫秒，old 就不一定排在最后；隔开 2ms 保证严格递增
+        time.sleep(0.002)
         store.create_session(space.id)  # 把 old 挤出「最近 5 条」
 
     base = _serve(config)
