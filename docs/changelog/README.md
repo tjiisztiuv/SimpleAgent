@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-24 修复输入法选词按 Enter 被误判为发送/确认（指挥台漏判、Safari 兜底 keyCode 229）](2026-09-24-ime-enter-fix.md)
 - [2026-09-24 修正「追问已有会话」变更记录：补设计文档链接、更新 restoreDispatch 说明、补手动验证记录](2026-09-24-session-followup-changelog-fix.md)
 - [2026-09-24 指挥台调度者支持追问已有会话（recent_sessions / followup），会话加互斥锁](2026-09-24-command-session-followup.md)
 - [2026-09-24 斜杠命令补全：CLI 的 Tab 补全 + 网页的 / 菜单，顺手修复网页端 /技能名 调不到的 bug](2026-09-24-slash-completion.md)
