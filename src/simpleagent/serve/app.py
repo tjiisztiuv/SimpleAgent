@@ -18,7 +18,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from simpleagent.agents.base import PERMISSION_LABELS, PERMISSIONS, SAFE
-from simpleagent.config import Config
+from simpleagent.config import Config, home_dir
+from simpleagent.knowledge.skills import discover_skills, skill_roots
 from simpleagent.panel.store import PanelStore
 from simpleagent.panel.summary import one_line, summarize
 from simpleagent.serve.bus import frame_to_sse
@@ -132,6 +133,9 @@ class Server:
         m = re.match(r"^/api/spaces/([^/]+)/files$", path_only)
         if m and method == "GET":
             return self._space_files(m.group(1))
+        m = re.match(r"^/api/spaces/([^/]+)/commands$", path_only)
+        if m and method == "GET":
+            return self._space_commands(m.group(1))
         m = re.match(r"^/api/spaces/([^/]+)/describe$", path_only)
         if m and method == "POST":
             return self._describe_space(m.group(1))
@@ -444,6 +448,34 @@ class Server:
             return Response(404, {"error": "space not found"})
         cwd = self.runner.cwd_for(space)
         return Response(200, {"cwd": str(cwd), "tree": file_tree(cwd, depth=2)})
+
+    def _space_commands(self, space_id: str) -> Response:
+        """输入框 / 菜单要列的技能。前端自己的 /help、/verify、/model 不走这里。
+
+        只有内置 loop 的普通空间会展开 /技能名（runner 的 _run_input）：外部 agent 的上下文
+        归它自己，指挥台的调度者没有技能，这两种返回空列表。每次现扫技能目录，不读会话里
+        冻住的那份：只有会话中途增删技能时两边才对不上，新会话就一致了。
+        """
+        space = self.store.get_space(space_id)
+        if space is None:
+            return Response(404, {"error": "space not found"})
+        if (
+            space.executor != "simpleagent"
+            or space_id == COMMAND_SPACE_ID
+            or not self.config.skills.enabled
+        ):
+            return Response(200, {"skills": []})
+        roots = skill_roots(self.config.skills.dirs, home_dir(), self.runner.cwd_for(space))
+        skills = sorted(discover_skills(roots).skills.values(), key=lambda skill: skill.name)
+        return Response(
+            200,
+            {
+                "skills": [
+                    {"name": skill.name, "description": " ".join(skill.description.split())}
+                    for skill in skills
+                ]
+            },
+        )
 
     def _session_rerun(self, session_id: str) -> Response:
         """重跑最后一条用户消息：改了 prompt / 换了模型后想再试一次时用。"""

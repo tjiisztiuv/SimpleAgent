@@ -38,6 +38,7 @@ const state = {
   editingSpace: null,     // 向导处于「空间设置」模式时是那个空间，新建时为 null
   commandSpaceId: null,   // 指挥台调度者住的系统空间（/api/meta 给），左栏不显示
   commandSpace: null,     // 它的详情：点进调度会话时，头部、日志要用
+  skills: {},             // 空间 id -> 能用 /技能名 调的技能（/ 菜单和 /help 用）
 };
 
 /* ────────────────────────────── 请求封装 ────────────────────────────── */
@@ -1588,40 +1589,158 @@ function exportMarkdown() {
   toast("已导出 Markdown");
 }
 
-/* 斜杠命令：只做本地就能完成的几个，不新增后端接口 */
+/* 斜杠命令：/help、/verify、/model 在前端处理；/技能名 原样发给后端，由 runner 展开成技能全文 */
+const WEB_COMMANDS = [
+  { name: "help", args: "", desc: "显示可用的命令和技能" },
+  { name: "verify", args: "", desc: "跑空间里配置的验证命令" },
+  { name: "model", args: "<profile>", desc: "切换这个空间的模型" },
+];
+
+/* 这个空间能用 /技能名 调的技能。有缓存直接用；fresh=true 时重新拉（技能目录可能改过） */
+async function skillsFor(spaceId, fresh = false) {
+  if (!spaceId) return [];
+  if (!fresh && state.skills[spaceId]) return state.skills[spaceId];
+  try {
+    state.skills[spaceId] = (await api.get(`/api/spaces/${spaceId}/commands`)).skills || [];
+  } catch {
+    // 拉不到就沿用上次的（没有就当空）：菜单里少几项，不影响别的
+    state.skills[spaceId] = state.skills[spaceId] || [];
+  }
+  return state.skills[spaceId];
+}
+
+/* 返回 true：在前端处理掉了；false：不是前端命令，交给后端当普通消息发（目前就是 /技能名） */
 async function runCommand(text) {
   const [cmd, ...rest] = text.slice(1).split(/\s+/);
   const arg = rest.join(" ").trim();
   if (cmd === "help" || cmd === "") {
-    addNoteCard(["可用命令：",
-      "/verify —— 跑空间里配置的验证命令",
-      `/model <profile> —— 切换模型（当前可选：${state.profiles.join(" / ")}）`,
-      "/help —— 显示这条帮助"].join("\n"));
-    return;
+    const skills = await skillsFor(state.spaceId);
+    const lines = ["可用命令：",
+      ...WEB_COMMANDS.map((c) => `/${c.name}${c.args ? ` ${c.args}` : ""} —— ${c.desc}`),
+      `（/model 当前可选：${state.profiles.join(" / ")}）`];
+    if (skills.length) {
+      lines.push("", "技能（/<技能名> [补充说明]）：",
+        ...skills.map((s) => `/${s.name} —— ${s.description.length > 80 ? `${s.description.slice(0, 80)}…` : s.description}`));
+    }
+    lines.push("", "输入 / 弹出补全菜单：↑↓ 选择，Tab 补全，Enter 选中，Esc 关闭。");
+    addNoteCard(lines.join("\n"));
+    return true;
   }
   if (cmd === "verify") {
-    if (!state.sessionId) return;
+    if (!state.sessionId) return true;
     toast("已提交验证命令");
     try { await api.post(`/api/sessions/${state.sessionId}/verify`, {}); }
     catch (e) { toast(`验证失败：${e.message}`); }
-    return;
+    return true;
   }
   if (cmd === "model") {
-    if (!arg) { toast("用法：/model <profile>"); return; }
-    if (!state.profiles.includes(arg)) { toast(`没有这个 profile：${arg}`); return; }
+    if (!arg) { toast("用法：/model <profile>"); return true; }
+    if (!state.profiles.includes(arg)) { toast(`没有这个 profile：${arg}`); return true; }
     const cur = findSpace(state.spaceId);
     if (cur && (cur.executor || "simpleagent") !== "simpleagent") {
       toast("这个空间绑的是外部 agent，模型由它自己的配置决定");
-      return;
+      return true;
     }
     try {
       await api.patch(`/api/spaces/${state.spaceId}`, { profile: arg });
       await loadSpaces();
       toast(`已切换到 ${arg}`);
     } catch (e) { toast(e.message); }
-    return;
+    return true;
   }
+  if ((await skillsFor(state.spaceId)).some((s) => s.name === cmd)) return false;
   toast(`未知命令 /${cmd}，输入 /help 看可用的`);
+  return true;
+}
+
+/* ── / 补全菜单 ── 候选怎么算在 slash.js，这里只管画和按键 */
+const slash = { open: false, items: [], index: 0 };
+
+/* input 事件：刚输入 / 时顺手重新拉一次技能，回来后按那时的输入重画 */
+function updateSlash() {
+  const ta = $("input");
+  if (ta.value.slice(0, ta.selectionStart) === "/" && state.spaceId) {
+    const spaceId = state.spaceId;
+    skillsFor(spaceId, true).then(() => {
+      if (state.spaceId === spaceId && document.activeElement === ta) refreshSlash();
+    });
+  }
+  refreshSlash();
+}
+
+function refreshSlash() {
+  const ta = $("input");
+  const sp = findSpace(state.spaceId);
+  const menu = ta.disabled ? null : slashMenu(ta.value.slice(0, ta.selectionStart), {
+    commands: WEB_COMMANDS,
+    skills: state.skills[state.spaceId] || [],
+    profiles: state.profiles,
+    current: sp ? sp.profile : "",
+  });
+  slash.open = !!menu;
+  slash.items = menu ? menu.items : [];
+  slash.index = 0;
+  drawSlash();
+}
+
+function closeSlash() {
+  slash.open = false;
+  drawSlash();
+}
+
+function drawSlash() {
+  $("composer").querySelector(".slash-menu")?.remove();
+  if (!slash.open) return;
+  const box = document.createElement("div");
+  box.className = "mentions slash-menu";
+  box.innerHTML = slash.items.map((it, i) => `
+    <div class="mention slash-item ${i === slash.index ? "is-active" : ""}" data-i="${i}"
+      title="${escapeHtml(it.desc)}">
+      <span class="slash-label">${escapeHtml(it.label)}</span>
+      ${it.hint ? `<span class="slash-hint">${escapeHtml(it.hint)}</span>` : ""}
+      ${it.tag ? `<span class="badge">${escapeHtml(it.tag)}</span>` : ""}
+      <span class="slash-desc">${escapeHtml(it.desc)}</span>
+    </div>`).join("");
+  $("composer").appendChild(box);
+  box.querySelectorAll(".slash-item").forEach((el) => {
+    // mousedown + preventDefault：不让输入框先失焦（失焦会关菜单，click 就落空了）
+    el.onmousedown = (ev) => { ev.preventDefault(); applySlash(Number(el.dataset.i), true); };
+  });
+  box.querySelector(".is-active")?.scrollIntoView({ block: "nearest" });
+}
+
+/* 选中一项：光标前的文字换成它。Enter / 点击选的、又不用再补参数的（/help、某个 profile）直接发送 */
+function applySlash(i, submit) {
+  const it = slash.items[i];
+  if (!it) return;
+  const ta = $("input");
+  ta.value = it.value + ta.value.slice(ta.selectionEnd);
+  ta.selectionStart = ta.selectionEnd = it.value.length;
+  ta.focus();
+  autoGrow();
+  if (submit && it.submit) { closeSlash(); send(); return; }
+  refreshSlash();  // 选了 /model 之后接着列 profile
+}
+
+/* 输入框的按键：菜单开着时 ↑↓ / Tab / Enter / Esc 归菜单，其余照常 */
+function onInputKeydown(e) {
+  if (e.isComposing) return;  // 输入法正在选词，这时的 Enter 是确认候选字，不是发送
+  if (slash.open) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const n = slash.items.length;
+      slash.index = (slash.index + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+      drawSlash();
+      return;
+    }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+      e.preventDefault();
+      applySlash(slash.index, e.key === "Enter");
+      return;
+    }
+    if (e.key === "Escape") { e.preventDefault(); closeSlash(); return; }
+  }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 }
 
 function addNoteCard(text) {
@@ -1652,7 +1771,9 @@ async function send() {
   if (!text || !state.sessionId) return;
   $("input").value = "";
   autoGrow();
-  if (text.startsWith("/")) { await runCommand(text); return; }
+  closeSlash();
+  // /技能名 前端不处理，和普通消息一样发出去
+  if (text.startsWith("/") && await runCommand(text)) return;
   addUserBubble(text);
   state.running = true;
   state.startedAt = Date.now();
@@ -1896,10 +2017,9 @@ async function boot() {
     toast("已提交验证命令");
     await api.post(`/api/sessions/${state.sessionId}/verify`, {}).catch((e) => toast(e.message));
   };
-  $("input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-  });
-  $("input").addEventListener("input", autoGrow);
+  $("input").addEventListener("keydown", onInputKeydown);
+  $("input").addEventListener("input", () => { autoGrow(); updateSlash(); });
+  $("input").addEventListener("blur", closeSlash);
   $("search").addEventListener("input", (e) => {
     state.filter = e.target.value;
     renderSpaces();
