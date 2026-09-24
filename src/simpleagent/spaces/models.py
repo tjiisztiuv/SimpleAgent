@@ -193,8 +193,10 @@ class SessionMeta:
     pinned: bool = False
     agent: str = "simpleagent"
     agent_session_id: str | None = None
-    # 由指挥台派发的子会话：指回调度者的那个会话。创建时定下，之后不变
+    # 由指挥台派发的子会话：指回调度者的那个会话。创建时定下，之后不变（记出身，左栏「派」标记看它）
     parent_session_id: str | None = None
+    # 最近一次是哪个调度会话让它跑的（派发、追问都会更新）。指挥台的卡片挂在这个调度者下面
+    dispatched_by: str | None = None
     created_at: str = ""
     updated_at: str = ""
     usage: dict[str, int] = field(default_factory=dict)
@@ -214,6 +216,7 @@ class SessionMeta:
             agent=d.get("agent", "simpleagent"),
             agent_session_id=d.get("agent_session_id"),
             parent_session_id=d.get("parent_session_id"),
+            dispatched_by=d.get("dispatched_by"),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
             usage=d.get("usage", {}) or {},

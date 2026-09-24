@@ -13,11 +13,13 @@ import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from simpleagent.llm.fake import FakeLLM
 from simpleagent.permissions import ApprovalDecision, ApprovalRequest
 from simpleagent.serve.approval import APIApprover, PendingApprovals
 from simpleagent.serve.bus import EventBus, Frame
-from simpleagent.serve.runner import Runner
+from simpleagent.serve.runner import Runner, SessionBusy
 from simpleagent.spaces.models import SpaceSpec
 from simpleagent.spaces.store import SpaceStore
 
@@ -453,3 +455,70 @@ def test_context_edited_frame():
     frame = event_to_frame(ContextEdited("compact", 4500, 1500, 5000, 8, usage=usage), "s1")
     assert frame.payload["kind"] == "compact"
     assert frame.payload["usage"]["cached_tokens"] == 3900
+
+
+# ------------------------------------------------- 10. 同一个会话同一时间只跑一轮
+def test_input_to_busy_session_conflicts(config, sa_home):
+    """会话正在跑时再发输入 / 重跑：409，不开第二轮（以前只靠前端把输入框置灰）。"""
+    from simpleagent.serve.app import Server
+
+    server = Server(config, store=SpaceStore(sa_home), llm_factory=_fake_factory([]))
+    store = server.store
+    space = store.create_space(SpaceSpec(name="t", kind="generic", profile="a"))
+    session = store.create_session(space.id)
+    store.append_message(space.id, session.id, {"role": "user", "content": "上一句"})
+    token = server.runner.claim(session.id)  # 假装它正在跑（调度者追问它、或者你刚发过）
+
+    body = json.dumps({"text": "再来一句"}).encode()
+    busy = server.handle("POST", f"/api/sessions/{session.id}/input", {}, body)
+    assert busy.status == 409 and "正在跑" in busy.body["error"]
+    rerun = server.handle("POST", f"/api/sessions/{session.id}/rerun", {}, b"")
+    assert rerun.status == 409 and "正在跑" in rerun.body["error"]
+    # 什么都没落：用户消息还是只有原来那一条
+    assert len(store.load_session(space.id, session.id).messages) == 1
+    server.runner._release(session.id, token)
+    assert not server.runner.session_busy(session.id)
+
+
+def test_claim_released_on_every_exit(config, sa_home):
+    """每种收口都要放开占用，而且赶在终态帧之前：收到帧马上再发，不能撞上 SessionBusy。"""
+    store = SpaceStore(sa_home)
+    space = store.create_space(SpaceSpec(name="t", kind="generic", profile="a"))
+    broken = store.create_space(SpaceSpec(name="b", kind="generic", profile="nope"))
+    session = store.create_session(space.id)
+    failing = store.create_session(broken.id)
+    runner = Runner(config, store=store, llm_factory=_fake_factory([{"content": "好", "delay": 1}]))
+    runner.start()
+    q, _ = runner.bus.subscribe(session.id)
+    qf, _ = runner.bus.subscribe(failing.id)
+    try:
+        # 正常跑完：收到 done 立刻再发一句，必须能发出去
+        runner.run_input(space.id, session.id, "一")
+        while (f := q.get(timeout=5)).type != "status" or f.payload["status"] != "done":
+            pass
+        runner.run_input(space.id, session.id, "二")
+        # 跑着的时候再发：直接拒绝
+        with pytest.raises(SessionBusy):
+            runner.run_input(space.id, session.id, "三")
+        # 取消（等它真的开始跑：还没开跑时取消是空操作）
+        while (f := q.get(timeout=5)).type != "status" or f.payload["status"] != "running":
+            pass
+        runner.cancel(session.id)
+        while (f := q.get(timeout=5)).type != "status" or f.payload["status"] != "cancelled":
+            pass
+        assert not runner.session_busy(session.id)
+
+        # 起不来（profile 不存在）
+        runner.run_input(broken.id, failing.id, "hi")
+        while (f := qf.get(timeout=5)).type != "status" or f.payload["status"] != "error":
+            pass
+        assert not runner.session_busy(failing.id)
+
+        # 会话被锁（空间切过执行者）：没走 _finalize 的提前返回，也要放开
+        store.change_executor(space.id, "claude-code")
+        runner.run_input(space.id, session.id, "四")
+        while (f := q.get(timeout=5)).type != "error":
+            pass
+        assert not runner.session_busy(session.id)
+    finally:
+        runner.shutdown()

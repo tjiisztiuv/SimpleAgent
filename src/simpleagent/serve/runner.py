@@ -10,8 +10,10 @@
 - 持有一个 McpManager：MCP server 在后台事件循环里启动一次，所有空间、所有会话共用。
 - 每个会话第一次跑时读一次项目指令、记忆索引、技能清单（M7），连同拼好的 system prompt 记下来，
   之后每轮都用这一份：Agent 每轮新建，system prompt 要是每轮重拼，中途改个记忆就整段缓存失效。
-- 指挥台（保留空间 sp_command）的会话走调度者：只有 propose_plan / dispatch 两个工具，
-  dispatch 通过 `run_child` 在目标空间新建子会话、等它跑完，把结论交回调度者（见 command/）。
+- 指挥台（保留空间 sp_command）的会话走调度者：只有 4 个调度工具（见 command/），
+  dispatch / followup 通过 `run_child` 在目标空间新建子会话或追问已有会话、等它跑完，
+  把结论交回调度者。
+- 同一个会话同一时间只跑一轮：`claim` 占住、收口时放开，被占着时再发输入抛 `SessionBusy`。
 
 线程模型：Runner 自己起一个线程跑 asyncio 事件循环；HTTP 层在另一个线程，通过
 run_coroutine_threadsafe / call_soon_threadsafe 与它通信，两者用总线（线程安全）解耦。
@@ -35,7 +37,7 @@ from simpleagent.agent.loop import Agent
 from simpleagent.agent.prompt import build_system_prompt
 from simpleagent.agent.session import Session
 from simpleagent.agents import adapter_for
-from simpleagent.command import ChildResult, command_prompt, command_tools
+from simpleagent.command import ChildResult, SessionBrief, command_prompt, command_tools
 from simpleagent.config import TOOL_OUTPUT_DIRNAME, Config, home_dir
 from simpleagent.events import Event, MessageDone, ToolResult
 from simpleagent.knowledge import Knowledge
@@ -52,10 +54,11 @@ from simpleagent.serve.frames import (
     verification_frame,
 )
 from simpleagent.spaces.describe import TITLE_LIMIT, DescribeError, describe_space, gather_material
-from simpleagent.spaces.models import COMMAND_SPACE_ID, Space, locked_reason
+from simpleagent.spaces.models import COMMAND_SPACE_ID, SessionMeta, Space, locked_reason
 from simpleagent.spaces.store import SpaceStore
 from simpleagent.spaces.verify import changed_since, fingerprint
 from simpleagent.tools import ToolRegistry, builtin_tools
+from simpleagent.tools.base import ToolError
 
 # (profile_name, Profile) -> LLM 实例；测试时注入 FakeLLM
 LLMFactory = Callable[[str, Any], Any]
@@ -77,6 +80,10 @@ def _log_future_error(fut: Any) -> None:
     exc = fut.exception()
     if exc is not None:
         print(f"[runner] 未处理的异常：{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+class SessionBusy(RuntimeError):
+    """会话正在跑一轮，不能再开一轮（HTTP 层转 409）。"""
 
 
 def _action_to_decision(action: str) -> ApprovalDecision:
@@ -121,6 +128,10 @@ class Runner:
         # 调度者正在等的子会话 → 这一轮的收口状态和失败原因（还没收口是 None）。
         # run_child 先登记、_finalize 只填登记过的、run_child 最后取走：普通会话不进来，不会越攒越多
         self._outcomes: dict[str, tuple[str, str | None] | None] = {}
+        # 正在跑一轮的会话 → 占用凭据。你在界面上发、调度者追问，可能同时冲着同一个会话来，
+        # 同一个会话同时跑两轮会把消息交错写进 jsonl。HTTP 线程和事件循环线程都会占，所以加锁
+        self._claimed: dict[str, object] = {}
+        self._claim_lock = threading.Lock()
 
     # ----------------------------------------------------------------- 生命周期
     def start(self) -> None:
@@ -172,7 +183,38 @@ class Runner:
 
     # --------------------------------------------------- 对 HTTP 层暴露的同步接口
     def run_input(self, space_id: str, session_id: str, user_input: str) -> None:
-        self._schedule(self._run_input(space_id, session_id, user_input))
+        """在会话里跑一轮。会话正在跑就抛 SessionBusy，不排队：排队的话界面上看不出来。"""
+        token = self.claim(session_id)
+        if token is None:
+            raise SessionBusy("这个会话正在跑，等它这一轮结束再发")
+        try:
+            self._schedule(self._run_input(space_id, session_id, user_input, token))
+        except BaseException:
+            self._release(session_id, token)
+            raise
+
+    def claim(self, session_id: str) -> object | None:
+        """占住这个会话跑一轮，返回占用凭据；已经有人在跑返回 None。
+
+        不用 _tasks 判断：它要等 _run_input 真正开始执行（还要先等 MCP 启动完）才登记，
+        从收到请求到登记之间有空档，两个请求能同时过检查。
+        """
+        with self._claim_lock:
+            if session_id in self._claimed:
+                return None
+            token = object()
+            self._claimed[session_id] = token
+            return token
+
+    def _release(self, session_id: str, token: object | None = None) -> None:
+        """放开占用。带 token 时只放自己那一份：收口时已经放过、又被别人占上的，不能误放。"""
+        with self._claim_lock:
+            if token is None or self._claimed.get(session_id) is token:
+                self._claimed.pop(session_id, None)
+
+    def session_busy(self, session_id: str) -> bool:
+        with self._claim_lock:
+            return session_id in self._claimed
 
     def cancel(self, session_id: str) -> None:
         if self._loop is None:
@@ -243,8 +285,52 @@ class Runner:
         """调度者能派的空间：左栏打开着的那些，不含指挥台自己。关掉的空间不派。"""
         return [s for s in self.store.list_spaces(opened_only=True) if s.id != COMMAND_SPACE_ID]
 
-    async def run_child(self, space_id: str, task: str, *, parent: str) -> ChildResult:
-        """在目标空间新建子会话跑 task，等它收口后把结论交回调度者。
+    def sessions(self, space_id: str | None = None, limit: int = 10) -> list[SessionBrief]:
+        """打开着的空间里最近的会话，新的在前（不含指挥台）。调度者追问前靠它找会话。
+
+        先只看 meta 排序、截断，最后几条才去读 jsonl 拿最后一句回复：每个会话都读太慢。
+        """
+        found: list[tuple[Space, SessionMeta]] = []
+        for space in self.targets():
+            if space_id is not None and space.id != space_id:
+                continue
+            for meta in self.store.list_sessions(space.id, limit=limit, include_pinned=False):
+                found.append((space, meta))
+        found.sort(key=lambda pair: pair[1].updated_at or "", reverse=True)
+        return [self._brief(space, meta) for space, meta in found[:limit]]
+
+    def find_session(self, session_id: str) -> SessionBrief | None:
+        """按 id 找会话，不管它在哪个空间（关掉的、指挥台的也找得到，能不能追问由调用方判断）。"""
+        space_id = self.store.find_session_space(session_id)
+        space = self.store.get_space(space_id) if space_id else None
+        meta = self.store.get_session_meta(space_id, session_id) if space else None
+        if space is None or meta is None:
+            return None
+        return self._brief(space, meta)
+
+    def _brief(self, space: Space, meta: SessionMeta) -> SessionBrief:
+        messages = self.store.load_session(space.id, meta.id).messages
+        return SessionBrief(
+            space_id=space.id,
+            space_name=space.name,
+            session_id=meta.id,
+            title=meta.title,
+            status=meta.status,
+            updated_at=meta.updated_at,
+            dispatched=meta.parent_session_id is not None,
+            locked=meta.agent != space.executor,
+            busy=self.session_busy(meta.id),
+            last_text=summarize(messages, meta)["last_text"],
+        )
+
+    async def run_child(
+        self, space_id: str, task: str, *, parent: str, session_id: str | None = None
+    ) -> ChildResult:
+        """在目标空间跑 task，等它收口后把结论交回调度者。
+
+        session_id 为空：新建子会话；不为空：追问这个已有的会话，沿用它的上下文。
+        结果只统计这一轮：追问前记下已有几条消息，之后的才拿去摘要、取回复——
+        不然这一轮没给回复时，会把上一轮的旧回复当成结论交回去。
 
         子会话单独起一个 asyncio 任务再等它，不能直接 await _run_input：它用 current_task()
         把自己登记进 _tasks，直接 await 的话登记的是调度者的任务，取消子会话会连调度者一起取消。
@@ -253,9 +339,22 @@ class Runner:
         """
         space = self.store.get_space(space_id)
         name = space.name if space else space_id
-        meta = self.store.create_session(space_id, parent=parent)
+        if session_id is None:
+            meta = self.store.create_session(space_id, parent=parent)
+        else:
+            found = self.store.get_session_meta(space_id, session_id)
+            if found is None:
+                raise ToolError(f"会话不存在：{session_id}")
+            meta = found
+        # 工具那边查过一次，这里再占一次：查完到这里之间，你可能刚在界面上给它发了一句
+        token = self.claim(meta.id)
+        if token is None:
+            raise ToolError(f"会话 {meta.id} 正在跑，等它这一轮结束再追问")
+        start = len(self.store.load_session(space_id, meta.id).messages)
+        # 卡片挂在「最近一次让它跑的调度者」下面；parent_session_id 记的是出身，不变
+        self.store.update_meta(space_id, meta.id, dispatched_by=parent)
         self._outcomes[meta.id] = None
-        child = asyncio.create_task(self._run_input(space_id, meta.id, task))
+        child = asyncio.create_task(self._run_input(space_id, meta.id, task, token))
         try:
             await asyncio.shield(child)
         except asyncio.CancelledError:
@@ -270,7 +369,7 @@ class Runner:
             outcome = self._outcomes.pop(meta.id, None)
         status, reason = outcome or ("error", "子会话没有跑起来")
         final = self.store.get_session_meta(space_id, meta.id)
-        messages = self.store.load_session(space_id, meta.id).messages
+        messages = self.store.load_session(space_id, meta.id).messages[start:]
         facts = summarize(messages, final)
         reply = next(
             (
@@ -291,10 +390,24 @@ class Runner:
             reason=reason,
             files=facts["files"],
             verification=facts["verification"],
+            followup=session_id is not None,
         )
 
     # --------------------------------------------------------------- 内部实现
-    async def _run_input(self, space_id: str, session_id: str, user_input: str) -> None:
+    async def _run_input(
+        self, space_id: str, session_id: str, user_input: str, token: object
+    ) -> None:
+        """跑一轮。调用方已经 claim 住会话（token）；这里保证无论怎么结束都放开。
+
+        正常收口在 _finalize 里就放了（要赶在终态帧之前，见那里的注释），这里是兜底：
+        提前 return、构造阶段之前就抛出的异常，都靠它放开，不然会话永远显示「正在跑」。
+        """
+        try:
+            await self._run_turn(space_id, session_id, user_input)
+        finally:
+            self._release(session_id, token)
+
+    async def _run_turn(self, space_id: str, session_id: str, user_input: str) -> None:
         space = self.store.get_space(space_id)
         meta = self.store.get_session_meta(space_id, session_id)
         if space is None or meta is None:
@@ -304,6 +417,7 @@ class Runner:
         # 什么都没跑，所以不落用户消息、不改状态、不走 _finalize。
         executor = meta.agent
         if executor != space.executor:
+            self._release(session_id)  # 先放开再报错：客户端看到报错就可能换个说法再发
             self.bus.publish(error_frame(session_id, locked_reason(executor, space.executor)))
             return
         # 内置 agent 用「模型看到的历史」（清理、压缩、中断修复都落在里面）；外部 CLI 的上下文
@@ -418,6 +532,10 @@ class Runner:
         extra: dict[str, Any] = {"space_id": space_id, "usage": usage}
         if reason is not None:
             extra["reason"] = reason
+        # 放开占用要赶在终态帧之前：客户端收到这帧马上再发一句，不能撞上还没放开的占用。
+        # 这时占用一定还是这一轮自己的，可以不带 token 直接放；之后到 _run_turn 退出都没有
+        # await，下一轮要等这段同步代码跑完才开始，不会和它的收尾交错
+        self._release(session_id)
         self.bus.publish(status_frame(session_id, status, extra))
         if status in FINAL_NOTICE:
             self._notify(space_id, session_id, status, reason)

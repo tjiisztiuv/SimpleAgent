@@ -22,7 +22,7 @@ from simpleagent.config import Config
 from simpleagent.panel.store import PanelStore
 from simpleagent.panel.summary import one_line, summarize
 from simpleagent.serve.bus import frame_to_sse
-from simpleagent.serve.runner import Runner
+from simpleagent.serve.runner import Runner, SessionBusy
 from simpleagent.serve.static import asset_bytes
 from simpleagent.spaces.describe import DescribeError
 from simpleagent.spaces.models import (
@@ -431,7 +431,10 @@ class Server:
             return Response(400, {"error": "text 不能为空"})
         if reason := self._locked(space_id, session_id):
             return Response(409, {"error": reason})
-        self.runner.run_input(space_id, session_id, str(text))
+        try:
+            self.runner.run_input(space_id, session_id, str(text))
+        except SessionBusy as e:
+            return Response(409, {"error": str(e)})
         return Response(202, {"accepted": True})
 
     def _space_files(self, space_id: str) -> Response:
@@ -456,7 +459,10 @@ class Server:
             return Response(400, {"error": "最后一条用户消息不是纯文本，无法重跑"})
         if reason := self._locked(space_id, session_id):
             return Response(409, {"error": reason})
-        self.runner.run_input(space_id, session_id, text)
+        try:
+            self.runner.run_input(space_id, session_id, text)
+        except SessionBusy as e:
+            return Response(409, {"error": str(e)})
         return Response(202, {"accepted": True, "text": text})
 
     def _locked(self, space_id: str, session_id: str) -> str | None:
@@ -545,8 +551,10 @@ class Server:
                     "status": meta.status,
                     "updated_at": meta.updated_at,
                     "verification": _verification_status(meta),
-                    # 指挥台派发的子会话：面板把它的卡片挂在调度者那张卡下面
+                    # 指挥台派发的子会话：面板把它的卡片挂在调度者那张卡下面。
+                    # 被别的调度者追问过的，挂到最近那一个下面（dispatched_by）
                     "parent_session_id": meta.parent_session_id,
+                    "dispatched_by": meta.dispatched_by,
                 }
                 if meta.status == "running":
                     running.append(item)
@@ -578,6 +586,8 @@ class Server:
         summary["title"] = meta.title if meta else ""
         summary["status"] = meta.status if meta else "idle"
         summary["parent_session_id"] = meta.parent_session_id if meta else None
+        summary["dispatched_by"] = meta.dispatched_by if meta else None
+        summary["locked"] = bool(self._locked(space_id, session_id))
         summary["line"] = one_line(summary)
         return Response(200, summary)
 
