@@ -9,7 +9,7 @@
 - 新增：空间建好之后可以修改执行者（`simpleagent` / `claude-code` / `opencode`），走 `PATCH /api/spaces/{id}` 带 `executor` 等字段，前端复用「新建空间」弹窗改名为「空间设置」。
 - 新增：切换执行者只影响**之后新建的会话**。会话的执行者在创建时锁在 `meta.agent`，runner 按 `meta.agent` 分路，不再看 `space.executor`。
 - 新增：`meta.agent != space.executor` 的老会话变为只读——发消息 / 重跑 API 直接返回 409；即使绕过前端调 API，runner 在真正执行前也会拒绝（发一帧 `error`，不落用户消息、不改会话状态）。切回原执行者即可继续。
-- 新增：空间还有会话在跑时切执行者返回 409；`kind`（任务形态）、`cwd`（工作目录）不开放修改。
+- 新增：空间还有会话在跑时切执行者返回 409（「空间设置」保存时总会带上 `executor`，执行者没变就不算切换，改名不受影响）；`kind`（任务形态）、`cwd`（工作目录）不开放修改。
 - 新增：前端空间卡片加了 ⚙「空间设置」按钮；老会话在列表里显示原执行者的徽标（变淡表示只读），输入框被禁用并提示原因。
 - 升级：`docs/design/client-ui.md` 补充「建好之后能切执行者」的设计说明和 `SpaceStore.change_executor` 签名。
 
@@ -41,7 +41,7 @@
 
 | 函数 / 类 | 变化 | 说明 |
 |---|---|---|
-| `Server._update_space()`（`PATCH /api/spaces/{id}`） | 修改 | 把请求体拆成「谁跑」这组字段（`executor` / `cli_model` / `permission` / `command` / `args`）和普通字段两部分；先校验完所有字段合法性再动手，避免执行者已切、后面字段才报错导致空间处于半改状态；空间有会话在跑（`runner.space_busy`）时拒绝并返回 409；`executor` 组字段调用 `store.change_executor`，其余字段仍走 `update_space` |
+| `Server._update_space()`（`PATCH /api/spaces/{id}`） | 修改 | 把请求体拆成「谁跑」这组字段（`executor` / `cli_model` / `permission` / `command` / `args`）和普通字段两部分；先校验完所有字段合法性再动手，避免执行者已切、后面字段才报错导致空间处于半改状态；空间有会话在跑（`runner.space_busy`）且真的要换执行者时返回 409（执行者没变，比如「空间设置」里只改名、改权限，不拦：跑着的那轮已按旧配置拉起）；`executor` 组字段调用 `store.change_executor`，其余字段仍走 `update_space` |
 | `Server._locked(space_id, session_id)` | 新增 | 判断会话是否因空间切换执行者而被锁住，锁住则返回 `locked_reason` 文案；供发消息 / 重跑接口提前拦截，让前端同步拿到 409 而不必等 SSE 里的 error 帧 |
 | `Server._session_input()` | 修改 | 增加 `self._locked()` 检查，锁住时返回 409 |
 | `Server._session_rerun()` | 修改 | 同上，增加锁定检查 |
@@ -64,7 +64,7 @@
 - 新增：`tests/serve/test_change_executor.py`，8 个测试：新会话切执行者后使用新的（`test_new_session_uses_new_executor`）、老会话被 runner 拒绝执行（`test_locked_session_rejected_by_runner`）、切回原执行者后解锁（`test_switch_back_unlocks`）、空间有会话在跑时拒绝切换（`test_space_busy`）、`PATCH` 接口的正常切换往返（`test_patch_executor_roundtrip`）、非法输入被拒（`test_patch_executor_rejects_bad_input`）、运行中切换的 409（`test_patch_executor_conflicts_while_running`）、锁住的会话发消息返回 409（`test_locked_session_input_returns_409`）。
 - 修改：`tests/spaces/test_store.py` 新增 6 个测试，覆盖 `change_executor` 的内置转 CLI、CLI 转内置、同执行者保留手写命令、非法输入拒绝且不落盘、`update_space` 拒绝改 `executor`、老会话的 `meta.agent` 不受空间切换影响。
 - 结果：`uv run ruff format --check` 157 个文件已是标准格式；`uv run ruff check` 全部通过；`uv run pytest -q` 691 passed（含本次新增的 14 个）。
-- 手动在浏览器里验证尚未做（待确认：⚙ 弹窗的实际交互、锁住会话的徽标和禁用效果）。
+- 手动验证（临时数据目录 + `uv run sa serve --port 8399`，浏览器里走一遍）：⚙ 弹窗标题变「空间设置」、形态置灰、验证命令隐藏；切到 claude-code 时出现切换提示；保存后空间徽标变 CC，老会话显示淡色 SA 徽标，输入框和重跑按钮禁用、占位文字说明原因；对老会话 `POST /input` 返回 409；只带 `permission` 不带 `executor` 返回 400；切回 simpleagent 后老会话解锁。
 
 ## 相关笔记
 
