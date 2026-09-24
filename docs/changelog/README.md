@@ -50,6 +50,7 @@
 
 ## 索引
 
+- [2026-09-24 修复 test_pinned_session_stays_on_top 在全量测试里的偶发失败（flaky）](2026-09-24-flaky-pinned-session-test-fix.md)
 - [2026-09-24 M8 第一部分：指挥台跨空间调度（调度者 + propose_plan/dispatch）+ 空间简介自动摘要](2026-09-24-command-dispatch.md)
 - [2026-09-24 空间新建后支持修改执行者，切换只影响新会话（老会话锁在原执行者，只读）](2026-09-24-space-change-executor.md)
 - [2026-09-23 M7 完成：项目指令（AGENTS.md）+ 长期记忆（memory/）+ 技能（SKILL.md）](2026-09-23-m7-memory-skills-instructions.md)
