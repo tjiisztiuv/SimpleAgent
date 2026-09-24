@@ -468,6 +468,7 @@ class SpaceStore:
             "pinned",
             "agent",
             "agent_session_id",
+            "dispatched_by",
             "usage",
             "verification",
         }

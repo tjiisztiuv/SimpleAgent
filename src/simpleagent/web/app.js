@@ -725,6 +725,8 @@ async function selectSession(spaceId, sessionId) {
 }
 
 /* ─────────────────────── 控制面板（W5） ─────────────────────── */
+const DISPATCH_PLACEHOLDER =
+  "要做什么？调度者会派给合适的空间，跨空间先给你看计划（@空间名 开头 = 直接下发）";
 const panelState = {
   open: false,
   summary: null,
@@ -736,6 +738,7 @@ const panelState = {
   todos: [],
   pollTimer: null,
   mentions: { open: false, items: [], index: 0, from: 0 },
+  replyTo: null,        // 追问模式：卡片上点了「追问」，下一句直接发给这个会话，不经过调度者
 };
 
 async function openPanel() {
@@ -808,21 +811,50 @@ function parseTarget(text) {
    running + recent（24 小时内的终态）补回来。完成 / 取消不进消息，指挥台就是看它们当前
    状态的地方，不能刷新一下就没了。补回来的卡片各拉一次摘要，运行中的之后交给 pollDispatch。 */
 async function restoreDispatch(summary) {
+  const rows = [...(summary.running || []), ...(summary.recent || [])];
+  // 已有的卡片：后台的 updated_at 变了，说明它又跑过一轮（被调度者追问、在对话里接着聊）。
+  // 卡片要跟上：换到最近那个调度者下面、状态和最后一句刷新。只看「在不在跑」不够：
+  // 追问可能在两次轮询之间就跑完了，卡片会一直停在上一轮
+  const refresh = [];
+  let touched = false;
+  for (const r of rows) {
+    const d = panelState.dispatch.find((x) => x.sessionId === r.session_id);
+    if (!d) continue;
+    const seen = d.updatedAt;
+    d.updatedAt = r.updated_at;
+    if (!d.done || seen === undefined || seen === r.updated_at) continue;
+    touched = true;
+    Object.assign(d, { parentId: cardParent(r), at: Date.parse(r.updated_at) || Date.now() });
+    if (r.status === "running") {
+      Object.assign(d, { done: false, startedAt: null, finishedAt: null });
+      d.summary = { ...(d.summary || {}), status: "running", last_text: "" };
+    } else {
+      d.finishedAt = r.updated_at;
+      refresh.push(d);
+    }
+  }
+  await Promise.all(refresh.map(async (d) => {
+    try { d.summary = await api.get(`/api/sessions/${d.sessionId}/summary`); } catch { /* 下一轮再试 */ }
+  }));
   const known = new Set(panelState.dispatch.map((d) => d.sessionId));
-  const fresh = [...(summary.running || []), ...(summary.recent || [])]
+  const fresh = rows
     .filter((r) => !known.has(r.session_id))
     .map((r) => ({
       spaceId: r.space_id,
       spaceName: r.space_name,
       sessionId: r.session_id,
-      parentId: r.parent_session_id || null,  // 调度者派出的子任务：卡片挂到它下面
+      updatedAt: r.updated_at,
+      parentId: cardParent(r),  // 调度者派出（或追问过）的子任务：卡片挂到它下面
       at: Date.parse(r.updated_at) || 0,
       startedAt: null,  // 后台只记了 updated_at，不知道这一轮从哪一刻开始
       done: r.status !== "running",
       finishedAt: r.status === "running" ? null : r.updated_at,
       summary: { title: r.title, status: r.status },
     }));
-  if (!fresh.length) return false;
+  if (!fresh.length) {
+    if (touched) panelState.dispatch.sort((a, b) => b.at - a.at);
+    return touched;
+  }
   await Promise.all(fresh.map(async (d) => {
     try {
       d.summary = await api.get(`/api/sessions/${d.sessionId}/summary`);
@@ -833,6 +865,11 @@ async function restoreDispatch(summary) {
   panelState.dispatch.push(...fresh.filter((d) => !now.has(d.sessionId)));
   panelState.dispatch.sort((a, b) => b.at - a.at);
   return true;
+}
+
+/* 卡片挂在哪张调度卡下面：最近一次让它跑的调度者，没有就看它是谁派出来的 */
+function cardParent(r) {
+  return r.dispatched_by || r.parent_session_id || null;
 }
 
 /* 卡片第二行：终态写明「完成 / 已取消 / 出错」再跟摘要，状态不能只靠左边那条色带 */
@@ -878,7 +915,10 @@ async function renderDispatch() {
     const when = d.finishedAt ? relTime(d.finishedAt)
       : d.startedAt ? fmtDur(Math.floor((Date.now() - d.startedAt) / 1000)) : "";
     const commander = d.spaceId === state.commandSpaceId;
-    return `<div class="dispatch ${cls}${child ? " child" : ""}" data-i="${i}">
+    // 追问：跑完了、没在等审批、没被锁（空间切过执行者）的会话才能接着说
+    const canReply = d.sessionId && !ap && cls !== "running" && !s.locked;
+    const replying = panelState.replyTo && panelState.replyTo.sessionId === d.sessionId;
+    return `<div class="dispatch ${cls}${child ? " child" : ""}${replying ? " replying" : ""}" data-i="${i}">
       <div class="row1"><span class="dot ${cls}"></span>
         ${child ? `<span class="arrow">↳</span>` : ""}
         <span class="who">${escapeHtml(d.spaceName)}</span>
@@ -892,6 +932,10 @@ async function renderDispatch() {
           <button class="btn btn-mini" data-act="ap-deny">拒绝</button>
         </div>` : ""}
       ${!ap && s.last_text ? `<div class="row3">${escapeHtml(s.last_text)}</div>` : ""}
+      ${canReply ? `<div class="dispatch-actions">
+          <button class="btn btn-mini" data-act="reply"
+            title="${commander ? "接着和这次的调度者说：它记得自己派过什么" : "直接对这个会话说，不经过调度者"}">追问</button>
+        </div>` : ""}
     </div>`;
   }).join("");
   box.querySelectorAll(".dispatch").forEach((el) => {
@@ -906,11 +950,77 @@ async function renderDispatch() {
         toast("已处理");
       };
     });
+    const reply = el.querySelector("[data-act='reply']");
+    if (reply) {
+      reply.onclick = (ev) => {
+        ev.stopPropagation();
+        setReplyTo(d);
+      };
+    }
     el.onclick = async () => {
       closePanel();
       await selectSession(d.spaceId, d.sessionId);
     };
   });
+}
+
+/* ── 追问模式：卡片上点「追问」，指挥台输入框的下一句直接发给那个会话 ── */
+function setReplyTo(d) {
+  const commander = d.spaceId === state.commandSpaceId;
+  panelState.replyTo = {
+    sessionId: d.sessionId,
+    spaceId: d.spaceId,
+    label: `${commander ? "调度者" : d.spaceName} · ${(d.summary || {}).title || "会话"}`,
+  };
+  renderReplyTo();
+  renderDispatch();
+  $("dispatch-input").focus();
+}
+
+function clearReplyTo() {
+  if (!panelState.replyTo) return;
+  panelState.replyTo = null;
+  renderReplyTo();
+  renderDispatch();
+}
+
+function renderReplyTo() {
+  const box = $("dispatch-reply");
+  const r = panelState.replyTo;
+  box.classList.toggle("hidden", !r);
+  $("dispatch-input").placeholder = r
+    ? "接着对它说（它记得之前的上下文）；Esc 退出追问"
+    : DISPATCH_PLACEHOLDER;
+  if (!r) { box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="reply-label">追问 → ${escapeHtml(r.label)}</span>
+    <button class="reply-x" title="退出追问（Esc）">✕</button>`;
+  box.querySelector(".reply-x").onclick = clearReplyTo;
+}
+
+/* 追问：直接往那个会话发一句。它正在跑、被锁住时后端回 409，原因显示在输入框下面 */
+async function sendReply(text) {
+  const r = panelState.replyTo;
+  const input = $("dispatch-input");
+  input.value = "";
+  $("dispatch-hint").textContent = "";
+  try {
+    await api.post(`/api/sessions/${r.sessionId}/input`, { text });
+  } catch (e) {
+    input.value = text;  // 没发出去：把原话还给输入框
+    $("dispatch-hint").textContent = `追问失败：${e.message}`;
+    return;
+  }
+  let d = panelState.dispatch.find((x) => x.sessionId === r.sessionId);
+  if (!d) {
+    d = { spaceId: r.spaceId, spaceName: r.label, sessionId: r.sessionId, parentId: null };
+    panelState.dispatch.push(d);
+  }
+  Object.assign(d, { at: Date.now(), startedAt: Date.now(), done: false, finishedAt: null });
+  d.summary = { ...(d.summary || {}), status: "running", last_text: "" };
+  panelState.dispatch.sort((a, b) => b.at - a.at);
+  panelState.replyTo = null;
+  renderReplyTo();
+  renderDispatch();
 }
 
 async function pollDispatch() {
@@ -929,6 +1039,8 @@ async function pollDispatch() {
       const s = await api.get(`/api/sessions/${d.sessionId}/summary`);
       const wasStatus = (d.summary || {}).status;
       d.summary = s;
+      // 追问过的会话会换一个调度者：卡片跟着挂过去
+      if (d.spaceId !== state.commandSpaceId) d.parentId = cardParent(s);
       if (s.status !== "running" && s.status !== "idle") {
         d.done = true;
         d.finishedAt = new Date().toISOString();
@@ -974,6 +1086,10 @@ async function dispatch() {
   const input = $("dispatch-input");
   const text = input.value.trim();
   if (!text) return;
+  if (panelState.replyTo) {
+    await sendReply(text);
+    return;
+  }
   if (!text.startsWith("@")) {
     await dispatchToCommander(text);
     return;
@@ -1939,6 +2055,7 @@ async function boot() {
       }
       if (e.key === "Escape") { e.preventDefault(); mn.open = false; updateMentions(); return; }
     }
+    if (e.key === "Escape" && panelState.replyTo) { e.preventDefault(); clearReplyTo(); return; }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); dispatch(); }
   });
   document.querySelectorAll("#inbox-view .seg-item").forEach((el) => {
