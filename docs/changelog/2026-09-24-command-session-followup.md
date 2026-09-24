@@ -21,7 +21,7 @@
 
 | 项 | 变化 | 说明 |
 |---|---|---|
-| 模块导出 | 修改 | 新增导出 `SessionBrief`；docstring 更新为「4 个调度工具」，补充设计文档引用 `docs/design/session-followup.md`（**该文件目前不存在，待确认/待补**） |
+| 模块导出 | 修改 | 新增导出 `SessionBrief`；docstring 更新为「4 个调度工具」，补充设计文档引用 `docs/design/session-followup.md`（设计文档随后在 `d8cf11a` 补上） |
 
 ### `src/simpleagent/command/prompt.py`
 
@@ -93,7 +93,7 @@
 |---|---|---|
 | `panelState.replyTo` | 新增字段 | 追问模式状态：记录当前正在追问哪个会话 |
 | `DISPATCH_PLACEHOLDER` | 新增常量 | 抽出原本内联的输入框占位符文案，追问模式退出时用来还原 |
-| `restoreDispatch()` | 修改 | 已有卡片若重新出现在最新 running 列表里，「复活」为运行中状态（被追问、在别处接着聊都会触发） |
+| `restoreDispatch()` | 修改 | 已有卡片按后台的 `updated_at` 刷新：变了就说明又跑过一轮（被追问、在别处接着聊），换到最近那个调度者下面、刷新状态和最后一句。只看「在不在 running 列表里」不够：追问可能在两次轮询（3 秒）之间就跑完了，卡片会一直停在上一轮 |
 | `cardParent()` | 新增函数 | 卡片挂靠逻辑：优先用 `dispatched_by`，没有则退回 `parent_session_id` |
 | `renderDispatch()` | 修改 | 卡片挂靠改用 `cardParent()`；跑完且未锁定、未在等审批的会话展示「追问」按钮；正在追问的卡片加高亮样式 |
 | `setReplyTo()` | 新增函数 | 进入追问模式：记录目标会话，刷新提示条和卡片列表，聚焦输入框 |
@@ -134,7 +134,7 @@
 - 测试结果：734 passed（`uv run pytest -q`）
 - `uv run ruff check`：通过
 - `uv run ruff format --check`：无需改动
-- 手动验证：未做（没有起临时服务点前端的追问按钮，调模型的路径只靠测试覆盖）
+- 手动验证：浏览器实测（临时 `SIMPLEAGENT_HOME` + 按规则应答的假模型，不联网）：新调度会话追问旧调度会话派出的子会话、卡片随之改挂；子任务卡和调度卡上的「追问」、Esc 退出；会话在跑时再发返回 409、原话留在输入框。实测中发现并修掉了上面 `restoreDispatch()` 那条的问题。没有接真实模型，详见 [design/session-followup.md](../design/session-followup.md) 第 6 节
 
 ## 相关笔记
 
