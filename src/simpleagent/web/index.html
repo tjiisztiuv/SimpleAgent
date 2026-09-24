@@ -111,7 +111,7 @@
 <!-- ───────────────────────── 新建空间向导 ───────────────────────── -->
 <div id="modal" class="modal hidden">
   <div class="modal-card">
-    <div class="modal-head">新建空间</div>
+    <div class="modal-head" id="modal-title">新建空间</div>
     <label class="field"><span>名称</span><input id="f-name" placeholder="例如：整理下载目录"></label>
     <label class="field"><span>任务形态</span>
       <select id="f-kind">
@@ -120,6 +120,9 @@
       </select>
     </label>
     <label class="field"><span>执行者</span><select id="f-executor"></select></label>
+    <div class="field-hint hidden" id="f-switch-hint">
+      切换执行者只影响新会话：已有会话的历史在原执行者那边，会被锁成只读，切回来可以继续
+    </div>
     <label class="field"><span id="f-model-label">模型</span><select id="f-profile"></select></label>
     <div class="field-hint hidden" id="f-model-hint">
       本机默认：不注入任何配置，等同于在那个目录下直接运行 claude / opencode
@@ -130,7 +133,7 @@
     </div>
     <label class="field hidden" id="f-cwd-wrap"><span>工作目录</span>
       <input id="f-cwd" placeholder="/Users/…/project"></label>
-    <label class="field"><span>验证命令（可选）</span><input id="f-verify" placeholder="uv run pytest -q"></label>
+    <label class="field" id="f-verify-wrap"><span>验证命令（可选）</span><input id="f-verify" placeholder="uv run pytest -q"></label>
     <div class="modal-err" id="modal-err"></div>
     <div class="modal-foot">
       <button id="f-cancel" class="btn">取消</button>

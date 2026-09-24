@@ -215,6 +215,90 @@ def test_invalid_combinations_rejected(tmp_path: Path):
     assert not (tmp_path / "spaces").exists() or list((tmp_path / "spaces").iterdir()) == []
 
 
+def test_change_executor_builtin_to_cli(tmp_path: Path):
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="t", kind="agent", cwd="/p", profile="deepseek"))
+    st.change_executor(sp.id, "claude-code")
+
+    got = SpaceStore(home=tmp_path).get_space(sp.id)
+    assert got is not None
+    assert got.executor == "claude-code"
+    assert got.agent is not None and got.agent.command == "claude"
+    assert got.permission == "safe"
+    assert got.profile == "deepseek"  # 留着，切回内置时接着用
+
+
+def test_change_executor_cli_to_builtin(tmp_path: Path):
+    st = store(tmp_path)
+    sp = st.create_space(
+        SpaceSpec(name="t", kind="generic", executor="opencode", permission="full")
+    )
+    st.change_executor(sp.id, "simpleagent", profile="kimi")
+
+    got = st.get_space(sp.id)
+    assert got is not None
+    assert got.executor == "simpleagent" and got.profile == "kimi"
+    assert got.agent is None and got.cli_model is None and got.permission == "safe"
+    toml = (tmp_path / "spaces" / sp.id / "space.toml").read_text(encoding="utf-8")
+    assert "[agent]" not in toml and "permission" not in toml
+
+
+def test_change_executor_same_keeps_binding(tmp_path: Path):
+    """同一个执行者只改权限：手写的 command / args 不能被默认值冲掉。"""
+    st = store(tmp_path)
+    sp = st.create_space(
+        SpaceSpec(
+            name="t",
+            kind="generic",
+            executor="claude-code",
+            command="/opt/claude",
+            args=["--verbose"],
+        )
+    )
+    got = st.change_executor(sp.id, "claude-code", permission="full")
+    assert got.permission == "full"
+    assert got.agent is not None
+    assert got.agent.command == "/opt/claude" and got.agent.args == ["--verbose"]
+
+
+def test_change_executor_rejects_invalid(tmp_path: Path):
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="t", kind="generic"))
+    toml = tmp_path / "spaces" / sp.id / "space.toml"
+    before = toml.read_text(encoding="utf-8")
+    bad = [
+        {"executor": "gpt"},
+        {"executor": "simpleagent", "cli_model": "deepseek"},
+        {"executor": "simpleagent", "permission": "full"},
+        {"executor": "claude-code", "permission": "root"},
+    ]
+    for kwargs in bad:
+        with pytest.raises(ValueError):
+            st.change_executor(sp.id, **kwargs)
+    assert toml.read_text(encoding="utf-8") == before  # 校验在落盘之前
+    with pytest.raises(KeyError):
+        st.change_executor("sp_missing", "simpleagent")
+
+
+def test_update_space_rejects_executor(tmp_path: Path):
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="t", kind="generic"))
+    with pytest.raises(ValueError):
+        st.update_space(sp.id, executor="claude-code")
+
+
+def test_change_executor_keeps_old_session_agent(tmp_path: Path):
+    """切换只影响新会话：老会话的执行者锁在 meta.agent 里。"""
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="t", kind="generic"))
+    old = st.create_session(sp.id)
+    st.change_executor(sp.id, "opencode")
+    new = st.create_session(sp.id)
+    old_meta = st.get_session_meta(sp.id, old.id)
+    assert old_meta is not None and old_meta.agent == "simpleagent"
+    assert new.agent == "opencode"
+
+
 def test_delete_space(tmp_path: Path):
     st = store(tmp_path)
     sp = st.create_space(SpaceSpec(name="sp", kind="generic"))

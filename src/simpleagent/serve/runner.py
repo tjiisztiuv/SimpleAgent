@@ -47,7 +47,7 @@ from simpleagent.serve.frames import (
     status_frame,
     verification_frame,
 )
-from simpleagent.spaces.models import Space
+from simpleagent.spaces.models import Space, locked_reason
 from simpleagent.spaces.store import SpaceStore
 from simpleagent.spaces.verify import changed_since, fingerprint
 from simpleagent.tools import ToolRegistry, builtin_tools
@@ -211,19 +211,38 @@ class Runner:
         self._loop.call_soon_threadsafe(self.pending.resolve, approval_id, decision)
         return True
 
+    def space_busy(self, space_id: str) -> bool:
+        """这个空间有没有会话正在跑。切执行者前要问：跑到一半换人会乱。
+
+        看内存里的 _tasks 而不是 meta.status：进程崩过的话 meta 会一直停在 running。
+        _tasks 只以 session id 为键，归属靠「meta 在不在这个空间目录下」判断；
+        list() 拷一份，因为事件循环线程可能正在增删它。
+        """
+        return any(
+            self.store.get_session_meta(space_id, sid) is not None for sid in list(self._tasks)
+        )
+
     def verify(self, space_id: str, session_id: str) -> None:
         self._schedule(self._verify(space_id, session_id))
 
     # --------------------------------------------------------------- 内部实现
     async def _run_input(self, space_id: str, session_id: str, user_input: str) -> None:
         space = self.store.get_space(space_id)
-        if space is None:
+        meta = self.store.get_session_meta(space_id, session_id)
+        if space is None or meta is None:
+            return
+        # 会话的执行者在创建时就定下了（meta.agent）；空间的 executor 只决定新会话用谁。
+        # 两边对不上说明空间中途切过执行者：历史在原执行者那边，接不过来，只能拒绝。
+        # 什么都没跑，所以不落用户消息、不改状态、不走 _finalize。
+        executor = meta.agent
+        if executor != space.executor:
+            self.bus.publish(error_frame(session_id, locked_reason(executor, space.executor)))
             return
         # 内置 agent 用「模型看到的历史」（清理、压缩、中断修复都落在里面）；外部 CLI 的上下文
         # 由它自己维护，这里只要用量。都要在落用户消息之前读，否则这条输入会被算进历史两次
         session = (
             self.store.load_model_session(space_id, session_id)
-            if space.executor == "simpleagent"
+            if executor == "simpleagent"
             else self.store.load_session(space_id, session_id)
         )
         try:
@@ -231,11 +250,11 @@ class Runner:
             # 还没接入）也要把用户说的这句留下来，否则刷新页面它就不见了。
             self.store.append_message(space_id, session_id, {"role": "user", "content": user_input})
             self.store.update_meta(space_id, session_id, status="running")
-            if space.executor == "simpleagent":
+            if executor == "simpleagent":
                 # MCP server 还在启动就等它：工具列表要在第一次请求前定下来
                 if self._mcp_started is not None:
                     await asyncio.wrap_future(self._mcp_started)
-                self._agents[session_id] = self._build_agent(space, session)
+                self._agents[session_id] = self._build_agent(space, session, executor)
                 # `/技能名 补充说明`：模型看到技能全文，界面上的消息还是用户敲的原话
                 knowledge, _ = self._prompts[session_id]
                 user_input = knowledge.skills.expand_command(user_input) or user_input
@@ -257,14 +276,14 @@ class Runner:
             self._tasks[session_id] = task
         try:
             reason: str | None = None
-            if space.executor == "simpleagent":
+            if executor == "simpleagent":
                 agent = self._agents[session_id]
                 async for event in agent.run(session, user_input):
                     self._on_event(space_id, session_id, event)
                 status = "done"
             else:
                 # 外部 CLI 走完全不同的执行路径，但生成的是同一套事件
-                status, reason = await self._run_cli(space, session, user_input)
+                status, reason = await self._run_cli(space, session, user_input, executor)
         except asyncio.CancelledError:
             self._finalize(space_id, session_id, session, "cancelled")
             raise
@@ -355,7 +374,7 @@ class Runner:
         )
 
     async def _run_cli(
-        self, space: Space, session: Session, user_input: str
+        self, space: Space, session: Session, user_input: str, executor: str
     ) -> tuple[str, str | None]:
         """把一次输入交给外部 CLI（claude / opencode），返回这次运行的收口状态和失败原因。
 
@@ -368,7 +387,7 @@ class Runner:
         """
         meta = self.store.get_session_meta(space.id, session.id)
         resume = (meta.agent_session_id if meta else None) or None
-        adapter = adapter_for(space.executor)
+        adapter = adapter_for(executor)
         argv = adapter.command(
             user_input,
             command=space.agent.command if space.agent else None,
@@ -413,7 +432,7 @@ class Runner:
                 try:
                     turn = adapter.parse(line)
                 except Exception as e:  # noqa: BLE001  一行解析失败不该毁掉整轮
-                    print(f"[runner] 解析 {space.executor} 事件失败：{e}", file=sys.stderr)
+                    print(f"[runner] 解析 {executor} 事件失败：{e}", file=sys.stderr)
                     continue
                 if adapter.session_id and adapter.session_id != resume:
                     # 第一次拿到对面的会话 id：存下来，下次追问带 resume 参数
@@ -440,11 +459,11 @@ class Runner:
             # 对面没给结束事件（进程被信号打死、崩了）：只能拿退出码兜底
             ok = code == 0
             if not ok and not error:
-                error = f"{space.executor} 退出码 {code}"
+                error = f"{executor} 退出码 {code}"
                 if stderr_tail:
                     error += f"：{stderr_tail}"
         if not ok:
-            message = error or f"{space.executor} 运行失败"
+            message = error or f"{executor} 运行失败"
             self.bus.publish(error_frame(session.id, message))
             return "error", message
         return "done", None
@@ -464,12 +483,12 @@ class Runner:
                 del buf[:-keep]
         return buf.decode("utf-8", "replace")[-keep:]
 
-    def _build_agent(self, space: Space, session: Session) -> Agent:
+    def _build_agent(self, space: Space, session: Session, executor: str) -> Agent:
         # 外部执行者走 _run_cli，不在这里造 Agent。走到这儿说明调用方忘了分支——
         # 宁可炸掉也不能静默用内置 loop 跑，那会让用户以为在跑 claude。
-        if space.executor != "simpleagent":
+        if executor != "simpleagent":
             raise RuntimeError(
-                f"{space.executor} 要走 CLI 路径（_run_cli），_build_agent 只服务内置 loop"
+                f"{executor} 要走 CLI 路径（_run_cli），_build_agent 只服务内置 loop"
             )
         if space.profile not in self.config.profiles:
             raise RuntimeError(

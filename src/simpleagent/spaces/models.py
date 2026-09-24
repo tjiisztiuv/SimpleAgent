@@ -36,6 +36,31 @@ EXECUTOR_LABELS = {
 DEFAULT_CLI_COMMAND = {"claude-code": "claude", "opencode": "opencode"}
 
 
+def locked_reason(session_executor: str, space_executor: str) -> str:
+    """会话被锁住（执行者和空间当前的对不上）时给人看的原因，runner 和 API 共用。"""
+    return (
+        f"这个会话由 {session_executor} 跑，空间已切到 {space_executor}；"
+        "新建会话继续，或把空间切回去"
+    )
+
+
+def validate_executor(
+    executor: str, *, cli_model: str | None, permission: str, command: str | None
+) -> None:
+    """「谁跑」这组字段的合法性，新建（from_spec）和切换（change_executor）共用。"""
+    if executor not in EXECUTORS:
+        raise ValueError(f"未知的执行者：{executor}")
+    if executor == "simpleagent":
+        if cli_model:
+            raise ValueError("内置执行者的模型用 profile 选，不要填 cli_model")
+        if permission != SAFE:
+            raise ValueError("内置执行者的权限由审批器管，不要填 permission")
+    elif command is None and executor not in DEFAULT_CLI_COMMAND:
+        raise ValueError(f"执行者 {executor} 没有默认命令，请显式填 command")
+    if permission not in PERMISSIONS:
+        raise ValueError(f"未知的权限档：{permission}")
+
+
 @dataclass
 class GenericConfig:
     """通用任务空间：无专有目录，用 spaces/<id>/tmp。"""
@@ -212,17 +237,12 @@ class Space:
         """从向导入参构造，顺便把非法组合拦在这儿（API 层直接转 400）。"""
         if spec.kind not in ("generic", "agent"):
             raise ValueError(f"未知的空间形态：{spec.kind}")
-        if spec.executor not in EXECUTORS:
-            raise ValueError(f"未知的执行者：{spec.executor}")
-        if spec.executor == "simpleagent":
-            if spec.cli_model:
-                raise ValueError("内置执行者的模型用 profile 选，不要填 cli_model")
-            if spec.permission != SAFE:
-                raise ValueError("内置执行者的权限由审批器管，不要填 permission")
-        elif spec.command is None and spec.executor not in DEFAULT_CLI_COMMAND:
-            raise ValueError(f"执行者 {spec.executor} 没有默认命令，请显式填 command")
-        if spec.permission not in PERMISSIONS:
-            raise ValueError(f"未知的权限档：{spec.permission}")
+        validate_executor(
+            spec.executor,
+            cli_model=spec.cli_model,
+            permission=spec.permission,
+            command=spec.command,
+        )
         if spec.kind == "agent" and not spec.cwd:
             raise ValueError("绑定目录的空间必须填工作目录")
         if spec.kind == "generic" and spec.cwd:

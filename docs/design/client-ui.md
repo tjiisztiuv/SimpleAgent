@@ -129,6 +129,13 @@ Space（空间）──1:N── Session（会话/一次运行实例）
   启动函数只是把 `claude` / `opencode` 在那个目录里拉起来，完全吃它自己的配置。
   填了 preset 才把「我们的配置」拼进启动参数（preset 机制还没做，见 10.9）。
 
+**建好之后能切执行者**（左栏卡片上的 ⚙「空间设置」，`PATCH /api/spaces/{id}` 带 `executor`）：
+
+- 切换只影响**新会话**。会话的执行者在创建时锁在 `meta.agent` 里，runner 按它分路，不看 `space.executor`；
+- 老会话的历史在原执行者那边（内置的在 `sessions/model/`，外部 CLI 的在它自己那里，我们只存 resume id），
+  接不过去，所以 `meta.agent != space.executor` 的会话只读：能看、能导出，发消息 / 重跑返回 409。切回原执行者即可继续；
+- 空间有会话在跑时不许切（409）；`kind` / `cwd`（在哪儿跑）不开放修改。
+
 ### 4.1 通用任务（`kind = "generic"`）
 
 - **没有专有目录**：工作目录自动分配为 `~/.simpleagent/spaces/<space-id>/tmp/`，空间创建时建好。
@@ -276,6 +283,8 @@ class SpaceStore:
     def create_space(self, spec: SpaceSpec) -> Space: ...
     def get_space(self, space_id: str) -> Space: ...
     def update_space(self, space_id: str, **fields) -> Space: ...
+    def change_executor(self, space_id: str, executor: str, *, profile=None,
+                        cli_model=None, permission=SAFE, command=None, args=None) -> Space: ...
     def close_space(self, space_id: str) -> None:          # opened=false，不删数据
     def delete_space(self, space_id: str) -> None:         # 显式删除，需二次确认
 
