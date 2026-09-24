@@ -43,6 +43,7 @@ SimpleAgent 是一个自用的本地 agent，有两个目标：一是学习 agen
 ### 2.3 提交与推送
 
 - 只在用户明确要求时才 `git commit` / `git push`
+- 用户敲 `/ship` 就是要求走完整个上线流程：审查、检查、验证、变更记录、开 PR、合并到 main，步骤见 [`.claude/skills/ship/SKILL.md`](.claude/skills/ship/SKILL.md)
 
 ## 3. 长期方向：个人 AI 工作台
 
