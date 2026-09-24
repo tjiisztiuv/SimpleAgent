@@ -35,6 +35,9 @@ M8 第一部分「跨空间调度」已完成（2026-09-24）：指挥台里直�
 一个内置 loop 会话，只有 `propose_plan` / `dispatch` 两个工具）按空间简介挑空间派发，子任务是目标空间里的
 普通会话、跑完把结论交回来；跨空间先出计划卡等确认（代码层面强制），互不依赖的步骤并行。空间之间的信息只经
 调度者中转。空间设置里新增「简介」，可让模型自动摘要。方案与改动见 [design/command-dispatch.md](design/command-dispatch.md)。
+M8 第二部分「追问已有会话」已完成（2026-09-24）：调度者多了 `recent_sessions` / `followup`，能查到近期会话（以前派的、
+`@` 直接下发的、手动开的）并接着问，沿用它的上下文；指挥台卡片上也能点「追问」直接对那个会话说。后端加了会话互斥，
+同一个会话同时只跑一轮，被占着时再发返回 409。方案与改动见 [design/session-followup.md](design/session-followup.md)。
 `task` 工具（会话内起子 agent）、`todo`、hooks 还没做。
 
 M4 进行中（2026-09-21 起），拆成 8 步：① 任务定义（`schedules.toml` + croniter + `sa schedule list`）✅
