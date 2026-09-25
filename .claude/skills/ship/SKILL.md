@@ -119,19 +119,27 @@ PR 描述分三段：**做了什么**（要点 + 变更记录链接）、**revie
 gh pr view <编号> --json mergeable,mergeStateStatus,statusCheckRollup
 ```
 
-- `mergeable` 必须是 `MERGEABLE`；有检查的话要全部通过，还在跑就等它跑完（仓库目前没配 CI，`statusCheckRollup` 为空）。
+- `mergeable` 必须是 `MERGEABLE`；有检查的话要全部通过，还在跑就等它跑完（PR 上目前没有检查，`statusCheckRollup` 为空）。
 - `gh pr merge <编号> --merge`：保留合并提交，和历史上的 PR 一致。
 - 不要用 `--admin` 绕过检查，不要开 auto-merge，不删远端分支（用户要求才删），不打 tag、不发版本。
+- 不要在分支里改版本号：合并后 `.github/workflows/bump-version.yml` 会自动把最后一位 +1 并提交回 main。
 
 ## 9. 收尾和汇报
 
+先等版本号 +1 的 workflow 跑完再拉取，不然本地 main 会少那个提交：
+
 ```bash
+gh run list --workflow bump-version.yml --branch main --limit 3 --json databaseId,headSha,status,conclusion
+gh run watch <databaseId> --exit-status
 git switch main && git pull
 ```
 
+- 找 `headSha` 等于合并提交的那次运行；刚合并完可能还没出现，过一会儿再查。
+- 运行失败时不要自己在 main 上补提交改版本号，把失败链接写进汇报，交给用户处理。
+
 汇报要简短，包括：
 
-- PR 链接和合并提交的 hash
+- PR 链接和合并提交的 hash，合并后的版本号（`uv version --short`）
 - 审查发现了什么、修了什么（写上文件和行号）
 - 自动检查结果：pytest 通过的数量
 - 手动验证走了哪些操作；哪些没法验证
