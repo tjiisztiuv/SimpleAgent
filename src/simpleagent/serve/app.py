@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from simpleagent.agents.base import PERMISSION_LABELS, PERMISSIONS, SAFE
 from simpleagent.config import Config, home_dir
 from simpleagent.knowledge.skills import discover_skills, skill_roots
+from simpleagent.panel.quote import quote_text
 from simpleagent.panel.store import PanelStore
 from simpleagent.panel.summary import one_line, summarize
 from simpleagent.serve.bus import frame_to_sse
@@ -426,12 +427,25 @@ class Server:
         return Response(200, meta.to_dict())
 
     def _session_input(self, session_id: str, body: bytes) -> Response:
+        """发一句话。带 `quote`（消息 id）时引用那条消息：text 可以空着，服务端拼上消息全文，
+        发出去之后把消息标成已读。拼接放在这边：列表只有预览，全文本来就在服务端。"""
         space_id = self.store.find_session_space(session_id)
         if space_id is None:
             return Response(404, {"error": "session not found"})
         data = self._safe_json(body) or {}
         text = data.get("text")
-        if not text or not str(text).strip():
+        quote = data.get("quote")
+        if quote is not None and (not isinstance(quote, str) or not quote):
+            return Response(400, {"error": "quote 要填消息 id"})
+        if quote:
+            item = self.panel.get_message(quote)
+            if item is None:
+                return Response(404, {"error": "引用的消息不存在"})
+            # ref 是外部投递时带进来的，不拿它拼路径去 get_space，从空间列表里查名字
+            names = {s.id: s.name for s in self.store.list_spaces(opened_only=False)}
+            ref_space = str((item.get("ref") or {}).get("space_id") or "")
+            text = quote_text(item, str(text or ""), space_name=names.get(ref_space))
+        elif not text or not str(text).strip():
             return Response(400, {"error": "text 不能为空"})
         if reason := self._locked(space_id, session_id):
             return Response(409, {"error": reason})
@@ -439,6 +453,8 @@ class Server:
             self.runner.run_input(space_id, session_id, str(text))
         except SessionBusy as e:
             return Response(409, {"error": str(e)})
+        if quote:
+            self.panel.mark_read(quote)  # 已经交出去处理了，归档倒计时从这一刻开始
         return Response(202, {"accepted": True})
 
     def _space_files(self, space_id: str) -> Response:

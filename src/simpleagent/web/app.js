@@ -745,6 +745,7 @@ const panelState = {
   pollTimer: null,
   mentions: { open: false, items: [], index: 0, from: 0 },
   replyTo: null,        // 追问模式：卡片上点了「追问」，下一句直接发给这个会话，不经过调度者
+  quote: null,          // 引用的消息 {id, title, source}：下一次下发带上它，全文由服务端拼
 };
 
 async function openPanel() {
@@ -994,13 +995,67 @@ function renderReplyTo() {
   const box = $("dispatch-reply");
   const r = panelState.replyTo;
   box.classList.toggle("hidden", !r);
-  $("dispatch-input").placeholder = r
-    ? "接着对它说（它记得之前的上下文）；Esc 退出追问"
-    : DISPATCH_PLACEHOLDER;
+  renderDispatchPlaceholder();
   if (!r) { box.innerHTML = ""; return; }
   box.innerHTML = `<span class="reply-label">追问 → ${escapeHtml(r.label)}</span>
     <button class="reply-x" title="退出追问（Esc）">✕</button>`;
   box.querySelector(".reply-x").onclick = clearReplyTo;
+}
+
+function renderDispatchPlaceholder() {
+  const r = panelState.replyTo;
+  const q = panelState.quote;
+  $("dispatch-input").placeholder =
+    r && q ? "接着对它说，引用的消息一起发过去；Esc 退出追问"
+    : r ? "接着对它说（它记得之前的上下文）；Esc 退出追问"
+    : q ? "补一句要求，也可以不写直接回车；@空间名 开头 = 直接发给那个空间；Esc 去掉引用"
+    : DISPATCH_PLACEHOLDER;
+}
+
+/* ── 引用消息：消息上点「→指挥台」，下一次下发带上这条消息 ──
+   发给谁都行：默认交给调度者，@空间名 直派、追问模式也一样带上。正文由服务端拼（列表只有预览），
+   发出去之后服务端把消息标成已读 */
+function setQuote(item) {
+  panelState.quote = { id: item.id, title: item.title, source: item.source };
+  renderQuote();
+  $("dispatch-input").focus();
+}
+
+function clearQuote() {
+  if (!panelState.quote) return;
+  panelState.quote = null;
+  renderQuote();
+}
+
+function renderQuote() {
+  const box = $("dispatch-quote");
+  const q = panelState.quote;
+  box.classList.toggle("hidden", !q);
+  renderDispatchPlaceholder();
+  if (!q) { box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="reply-label" title="${escapeHtml(q.title)}">引用 · ${escapeHtml(sourceLabel(q.source))} ·「${escapeHtml(q.title)}」</span>
+    <button class="reply-x" title="去掉引用（Esc）">✕</button>`;
+  box.querySelector(".reply-x").onclick = clearQuote;
+}
+
+/* /input 的请求体：挂着引用就带上消息 id */
+function inputPayload(text) {
+  return panelState.quote ? { text, quote: panelState.quote.id } : { text };
+}
+
+/* 引用发出去了：去掉标签，消息列表跟着刷新（它已经被标成已读）。
+   请求在路上时又点了另一条消息的「→指挥台」，新挂上的那条不能被顺手清掉 */
+function quoteSent(body) {
+  if (!body.quote) return;
+  if (panelState.quote && panelState.quote.id === body.quote) clearQuote();
+  loadInbox().catch(() => { /* 下一轮轮询再刷 */ });
+}
+
+/* 本页先画出来的卡片标题；服务端的标题是拼好的全文取前 40 字，下一轮轮询会换成那个 */
+function cardTitle(text) {
+  const q = panelState.quote;
+  const full = q ? `${text || "处理这条消息"} 【引用消息】${q.title}` : text;
+  return full.replace(/\s+/g, " ").slice(0, 40);
 }
 
 /* 追问：直接往那个会话发一句。它正在跑、被锁住时后端回 409，原因显示在输入框下面 */
@@ -1009,13 +1064,15 @@ async function sendReply(text) {
   const input = $("dispatch-input");
   input.value = "";
   $("dispatch-hint").textContent = "";
+  const body = inputPayload(text);
   try {
-    await api.post(`/api/sessions/${r.sessionId}/input`, { text });
+    await api.post(`/api/sessions/${r.sessionId}/input`, body);
   } catch (e) {
     input.value = text;  // 没发出去：把原话还给输入框
     $("dispatch-hint").textContent = `追问失败：${e.message}`;
     return;
   }
+  quoteSent(body);
   let d = panelState.dispatch.find((x) => x.sessionId === r.sessionId);
   if (!d) {
     d = { spaceId: r.spaceId, spaceName: r.label, sessionId: r.sessionId, parentId: null };
@@ -1091,7 +1148,7 @@ async function loadStatsOnly() {
 async function dispatch() {
   const input = $("dispatch-input");
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !panelState.quote) return;  // 挂着引用时可以不写字：服务端补一句「处理这条消息」
   if (panelState.replyTo) {
     await sendReply(text);
     return;
@@ -1112,8 +1169,8 @@ async function dispatch() {
   input.value = "";
   $("dispatch-hint").textContent = "";
 
-  if (!t.rest) {
-    // 只 @：查这个空间最近一个 session 的状态，不新建
+  if (!t.rest && !panelState.quote) {
+    // 只 @、也没挂引用：查这个空间最近一个 session 的状态，不新建
     const metas = await api.get(`/api/spaces/${t.space.id}/sessions?limit=1`);
     const m = metas[0];
     panelState.dispatch.unshift({
@@ -1133,8 +1190,11 @@ async function dispatch() {
     return;
   }
 
+  const body = inputPayload(t.rest);
+  const title = cardTitle(t.rest);
   const meta = await api.post(`/api/spaces/${t.space.id}/sessions`, {});
-  await api.post(`/api/sessions/${meta.id}/input`, { text: t.rest });
+  await api.post(`/api/sessions/${meta.id}/input`, body);
+  quoteSent(body);
   // 上面两次请求之间，轮询可能已经把这个会话当成「运行中」恢复成卡片了
   panelState.dispatch = panelState.dispatch.filter((d) => d.sessionId !== meta.id);
   panelState.dispatch.unshift({
@@ -1145,7 +1205,7 @@ async function dispatch() {
     at: Date.now(),
     startedAt: Date.now(),
     done: false,
-    summary: { title: t.rest.slice(0, 40), status: "running" },
+    summary: { title, status: "running" },
   });
   renderDispatch();
 }
@@ -1159,15 +1219,18 @@ async function dispatchToCommander(text) {
   }
   input.value = "";
   $("dispatch-hint").textContent = "";
+  const body = inputPayload(text);
+  const title = cardTitle(text);
   let meta;
   try {
     meta = await api.post(`/api/spaces/${state.commandSpaceId}/sessions`, {});
-    await api.post(`/api/sessions/${meta.id}/input`, { text });
+    await api.post(`/api/sessions/${meta.id}/input`, body);
   } catch (e) {
     input.value = text;  // 没发出去：把原话还给输入框，免得重打
     $("dispatch-hint").textContent = `下发失败：${e.message}`;
     return;
   }
+  quoteSent(body);
   panelState.dispatch = panelState.dispatch.filter((d) => d.sessionId !== meta.id);
   panelState.dispatch.unshift({
     spaceId: state.commandSpaceId,
@@ -1177,7 +1240,7 @@ async function dispatchToCommander(text) {
     at: Date.now(),
     startedAt: Date.now(),
     done: false,
-    summary: { title: text.slice(0, 40), status: "running" },
+    summary: { title, status: "running" },
   });
   renderDispatch();
 }
@@ -1242,6 +1305,7 @@ function renderInbox() {
         <span class="inbox-hint">${escapeHtml(archiveHint(m))}</span>
         <span class="inbox-acts">
           <span class="todo-tag" data-act="todo" title="转为备忘">+备忘</span>
+          <span class="todo-tag" data-act="command" title="挂到指挥台的输入框上，补一句要求再下发">→指挥台</span>
           ${archivedView ? "" : `<span class="todo-tag" data-act="archive" title="不等倒计时，直接归档">归档</span>`}
         </span>
       </div>
@@ -1252,6 +1316,10 @@ function renderInbox() {
     el.querySelector('[data-act="todo"]').onclick = (ev) => {
       ev.stopPropagation();
       messageToTodo(item).catch((e) => toast(e.message));
+    };
+    el.querySelector('[data-act="command"]').onclick = (ev) => {
+      ev.stopPropagation();
+      setQuote(item);
     };
     const arch = el.querySelector('[data-act="archive"]');
     if (arch) {
@@ -2064,6 +2132,7 @@ async function boot() {
       if (e.key === "Escape") { e.preventDefault(); mn.open = false; updateMentions(); return; }
     }
     if (e.key === "Escape" && panelState.replyTo) { e.preventDefault(); clearReplyTo(); return; }
+    if (e.key === "Escape" && panelState.quote) { e.preventDefault(); clearQuote(); return; }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); dispatch(); }
   });
   document.querySelectorAll("#inbox-view .seg-item").forEach((el) => {
@@ -2089,6 +2158,12 @@ async function boot() {
   };
   $("mm-todo").onclick = () => {
     if (panelState.modalItem) messageToTodo(panelState.modalItem).catch((e) => toast(e.message));
+  };
+  $("mm-command").onclick = () => {
+    const m = panelState.modalItem;
+    if (!m) return;
+    closeMessageModal();
+    setQuote(m);
   };
   $("mm-archive").onclick = async () => {
     const m = panelState.modalItem;
