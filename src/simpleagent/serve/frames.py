@@ -135,12 +135,18 @@ def error_frame(session_id: str, message: str) -> Frame:
 
 
 def approval_request_frame(
-    session_id: str, approval_id: str, tool_name: str, arguments: str
+    session_id: str, approval_id: str, tool_name: str, arguments: str, reason: str = ""
 ) -> Frame:
+    # reason 是 Policy / 工具给的「为什么要问」：审批卡上要显示，刷新后补发的卡（details()）也带着
     return Frame(
         session_id,
         "approval_request",
-        {"approval_id": approval_id, "tool_name": tool_name, "arguments": arguments},
+        {
+            "approval_id": approval_id,
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "reason": reason,
+        },
     )
 
 

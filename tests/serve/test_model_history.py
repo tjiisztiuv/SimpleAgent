@@ -51,7 +51,10 @@ def assert_paired(messages: list[dict]) -> None:
 
 def setup(config, sa_home, script: list[Any]):
     store = SpaceStore(sa_home)
-    space = store.create_space(SpaceSpec(name="t", kind="generic", profile="a"))
+    # 只读模式：审批相关的用例靠 write_file 触发审批，工作区模式下它不用问
+    space = store.create_space(
+        SpaceSpec(name="t", kind="generic", profile="a", permission="read-only")
+    )
     session = store.create_session(space.id)
     llm = SharedScript(script)
     runner = Runner(config, store=store, llm_factory=llm)

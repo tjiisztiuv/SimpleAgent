@@ -37,7 +37,7 @@ def _write(path: Path, content: str) -> None:
     description=DESCRIPTION,
     readonly=False,
     permission="ask",
-    scope=lambda args, ctx: Scope(paths=(ctx.resolve(args.path),)),
+    scope=lambda args, ctx: Scope(paths=(ctx.resolve(args.path),), file_edit=True),
 )
 async def write_file(args: WriteFileArgs, ctx: ToolContext) -> str:
     path = ctx.resolve(args.path)

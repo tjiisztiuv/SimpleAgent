@@ -33,12 +33,11 @@ from simpleagent.spaces.models import (
     VerifyConfig,
     _now,
     clean_description,
+    normalize_permission,
     validate_executor,
 )
 
 SPACES_DIRNAME = "spaces"
-# 旧文件没有 permission 字段时按「只读」处理：宁可少给权限
-DEFAULT_PERMISSION = "safe"
 # update_space 能逐个改的字段。「谁跑」那组（executor 等）不在这里，走 change_executor
 UPDATABLE_FIELDS = frozenset(
     {"name", "description", "profile", "opened", "pinned", "last_opened_at", "keep_sessions"}
@@ -79,7 +78,7 @@ def _space_to_toml(space: Space) -> str:
         out.insert(2, f"description = {_toml_str(space.description)}")
     if space.cli_model:
         out.append(f"cli_model = {_toml_str(space.cli_model)}")
-    if space.executor != "simpleagent":
+    if space.permission:  # 没单独设过就不写，读回来还是「跟配置默认」
         out.append(f"permission = {_toml_str(space.permission)}")
     if space.kind == "agent" and space.cwd:
         out.append(f"cwd = {_toml_str(space.cwd)}")
@@ -115,6 +114,15 @@ def _space_to_toml(space: Space) -> str:
     return "\n".join(out) + "\n"
 
 
+def _load_permission(value: Any) -> str | None:
+    """space.toml 里的 permission。旧文件没有这个字段（内置执行者以前不写）就是 None；
+    手改写错了按只读处理，不让整个空间从列表里消失，也宁可少给权限。"""
+    try:
+        return normalize_permission(value if isinstance(value, str) else None)
+    except ValueError:
+        return SAFE
+
+
 def _space_from_toml(data: dict[str, Any], space_id: str) -> Space:
     # 兼容 W1~W5 写下的旧文件：那时执行者叫 [agent].name，cwd 也藏在 [agent] 里
     agent_data = data.get("agent") or {}
@@ -127,7 +135,7 @@ def _space_from_toml(data: dict[str, Any], space_id: str) -> Space:
         executor=executor,
         profile=data.get("profile", "default"),
         cli_model=data.get("cli_model") or None,
-        permission=data.get("permission") or DEFAULT_PERMISSION,
+        permission=_load_permission(data.get("permission")),
         cwd=data.get("cwd") or agent_data.get("cwd"),
         opened=bool(data.get("opened", True)),
         pinned=bool(data.get("pinned", False)),
@@ -267,7 +275,7 @@ class SpaceStore:
         *,
         profile: str | None = None,
         cli_model: str | None = None,
-        permission: str = SAFE,
+        permission: str | None = None,
         command: str | None = None,
         args: list[str] | None = None,
     ) -> Space:
@@ -279,12 +287,14 @@ class SpaceStore:
         space = self.get_space(space_id)
         if space is None:
             raise KeyError(f"空间不存在: {space_id}")
+        permission = normalize_permission(permission)
         validate_executor(executor, cli_model=cli_model, permission=permission, command=command)
+        # 权限模式两种执行者都有；没给就回到「没单独设过」（跟配置默认 / 外部 CLI 只读）
+        space.permission = permission
         if executor == "simpleagent":
             # 外部 CLI 的那几项全部清掉，免得 space.toml 里留着不生效的配置
             space.agent = None
             space.cli_model = None
-            space.permission = SAFE
         else:
             # 执行者没变、也没指定新命令（比如只改权限）：保留手写的启动命令和参数
             if space.executor == executor and space.agent and command is None and args is None:
@@ -295,7 +305,6 @@ class SpaceStore:
                 )
             space.agent = binding
             space.cli_model = cli_model
-            space.permission = permission
         # profile 两种执行者都存着：切到外部 CLI 时也记下来，切回内置时接着用
         if profile:
             space.profile = profile

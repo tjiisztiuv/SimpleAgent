@@ -23,6 +23,7 @@ from simpleagent.knowledge.skills import discover_skills, skill_roots
 from simpleagent.panel.quote import quote_text
 from simpleagent.panel.store import PanelStore
 from simpleagent.panel.summary import one_line, summarize
+from simpleagent.permissions import MODE_SUMMARY, Mode
 from simpleagent.serve.bus import frame_to_sse
 from simpleagent.serve.runner import Runner, SessionBusy
 from simpleagent.serve.static import asset_bytes
@@ -48,6 +49,16 @@ RECENT_DONE_WINDOW_MINUTES = 24 * 60
 FINAL_STATUSES = frozenset({"done", "error", "cancelled"})
 # 自动生成空间简介最多等多久：一次不带工具的短请求，正常几秒就回来
 DESCRIBE_TIMEOUT = 60.0
+
+
+def _permission_options(executor: str) -> list[dict[str, str]]:
+    """空间设置里权限下拉的选项：内置执行者三档，外部 CLI 两档。
+
+    description 显示在下拉框下面：写进 label 的话太长，下拉框里会被截断。
+    """
+    if executor == "simpleagent":
+        return [{"name": m.value, "label": m.label, "description": MODE_SUMMARY[m]} for m in Mode]
+    return [{"name": p, "label": PERMISSION_LABELS[p], "description": ""} for p in PERMISSIONS]
 
 
 def _within_window(ts: str, cutoff: float) -> bool:
@@ -227,13 +238,13 @@ class Server:
                 "name": name,
                 "label": EXECUTOR_LABELS[name],
                 "external": name != "simpleagent",
-                # 外部 CLI 的模型本次只支持「本机默认（不注入配置）」，所以是空列表；
-                # 权限档两份，向导里的下拉直接照这个渲染
+                # 外部 CLI 的模型本次只支持「本机默认（不注入配置）」，所以是空列表
                 "models": [] if name != "simpleagent" else profiles,
-                "permissions": []
-                if name == "simpleagent"
-                else [{"name": p, "label": PERMISSION_LABELS[p]} for p in PERMISSIONS],
-                "default_permission": SAFE,
+                # 权限下拉照这个渲染：内置执行者三档，外部 CLI 两档（它没有「工作区」）
+                "permissions": _permission_options(name),
+                "default_permission": (
+                    self.config.permissions.mode.value if name == "simpleagent" else SAFE
+                ),
             }
             for name in EXECUTORS
         ]
@@ -259,6 +270,8 @@ class Server:
 
     def _space_view(self, space) -> dict[str, Any]:
         data = space.to_dict()
+        # permission 可能是 None（没单独设过）；界面显示和标红都看实际生效的这个
+        data["mode"] = space.effective_mode(self.config.permissions.mode).value
         data["sessions"] = [m.to_dict() for m in self.store.list_sessions(space.id, limit=5)]
         return data
 
@@ -335,12 +348,16 @@ class Server:
                 # 执行者没变（只改名、改权限）就不拦：跑着的那轮已经按旧配置拉起来了
                 if exec_fields["executor"] != current.executor and self.runner.space_busy(space_id):
                     return Response(409, {"error": "这个空间还有会话在跑，停下来再切执行者"})
-                self.store.change_executor(
+                changed = self.store.change_executor(
                     space_id,
                     exec_fields.pop("executor"),
                     profile=data.pop("profile", None),
-                    permission=exec_fields.pop("permission", None) or SAFE,
+                    permission=exec_fields.pop("permission", None),
                     **exec_fields,
+                )
+                # 正在跑的会话从下一次工具调用起按新模式判定，不用等这一轮结束
+                self.runner.apply_mode(
+                    space_id, changed.effective_mode(self.config.permissions.mode)
                 )
             space = (
                 self.store.update_space(space_id, **data)

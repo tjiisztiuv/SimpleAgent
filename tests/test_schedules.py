@@ -252,16 +252,32 @@ prompt = "x"
     assert main(["schedule", "list"]) == 1  # 有任务加载失败
     out = capsys.readouterr().out
     assert "weekday   工作日早报" in out
-    assert "0 9 * * 1-5 · 下次 09-28 周一 09:00 · 工具 web_fetch, bash · glm" in out
+    assert "0 9 * * 1-5 · 下次 09-28 周一 09:00 · 权限 工作区 · 允许 web_fetch, bash · glm" in out
     assert "0 8 * * * · 已停用" in out
     assert "broken\n    ✗ cron：" in out
 
 
-def test_cli_schedule_list_readonly_default(sa_home: Path, capsys: pytest.CaptureFixture[str]):
+def test_cli_schedule_list_shows_mode(sa_home: Path, capsys: pytest.CaptureFixture[str]):
+    """没写 mode 跟配置走（默认工作区）；写了就按任务的，中文名也认。"""
     init_config()
-    _write(sa_home, '[jobs.a]\ncron = "0 9 * * *"\nprompt = "x"\n')
+    _write(
+        sa_home,
+        '[jobs.a]\ncron = "0 9 * * *"\nprompt = "x"\n'
+        '[jobs.b]\ncron = "0 9 * * *"\nprompt = "x"\nmode = "只读"\n'
+        '[jobs.c]\ncron = "0 9 * * *"\nprompt = "x"\nmode = "full"\n',
+    )
     assert main(["schedule", "list"]) == 0
-    assert "工具 只读工具" in capsys.readouterr().out
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].endswith("· 权限 工作区")
+    assert lines[3].endswith("· 权限 只读")
+    assert lines[5].endswith("· 权限 全放行")
+
+
+def test_job_with_unknown_mode_fails_to_load(sa_home: Path, capsys: pytest.CaptureFixture[str]):
+    init_config()
+    _write(sa_home, '[jobs.a]\ncron = "0 9 * * *"\nprompt = "x"\nmode = "yolo"\n')
+    assert main(["schedule", "list"]) == 1
+    assert "未知的权限模式" in capsys.readouterr().out
 
 
 def test_cli_schedule_list_without_file(sa_home: Path, capsys: pytest.CaptureFixture[str]):

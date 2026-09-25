@@ -7,6 +7,7 @@ from simpleagent.cli import main
 from simpleagent.config import (
     Config,
     ConfigError,
+    PermissionsConfig,
     Profile,
     config_path,
     dev_checkout,
@@ -16,6 +17,7 @@ from simpleagent.config import (
     load_config,
     read_env_file,
 )
+from simpleagent.permissions import Mode
 
 
 def test_init_writes_example_config_that_loads(sa_home: Path):
@@ -39,6 +41,9 @@ def test_init_refuses_to_overwrite(sa_home: Path):
 def test_missing_config_hints_init(sa_home: Path):
     with pytest.raises(ConfigError, match="sa init"):
         load_config()
+
+
+BASE_CONFIG = 'default_profile = "a"\n[profiles.a]\nbase_url = "http://a"\nmodel = "m"\n'
 
 
 def _write(content: str) -> None:
@@ -212,6 +217,42 @@ def test_panel_config(sa_home: Path):
     _write(base + "[panel]\narchive_after_minutes = 0\n")
     with pytest.raises(ConfigError, match="archive_after_minutes"):
         load_config()
+
+
+# ------------------------------------------------------------------ 权限模式
+
+
+def test_permissions_mode_defaults_to_workspace(sa_home: Path):
+    init_config()  # 模板里 [permissions] 是注释掉的
+    assert load_config().permissions.mode is Mode.WORKSPACE
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("read-only", Mode.READ_ONLY), ("全放行", Mode.FULL)]
+)
+def test_permissions_mode_accepts_english_and_chinese(sa_home: Path, value: str, expected: Mode):
+    _write(BASE_CONFIG + f'[permissions]\nmode = "{value}"\n')
+    assert load_config().permissions.mode is expected
+
+
+def test_permissions_mode_typo_is_rejected(sa_home: Path):
+    _write(BASE_CONFIG + '[permissions]\nmode = "yolo"\n')
+    with pytest.raises(ConfigError, match="未知的权限模式"):
+        load_config()
+
+
+@pytest.mark.parametrize(
+    ("configured", "explicit", "expected"),
+    [
+        (Mode.WORKSPACE, None, Mode.WORKSPACE),
+        (Mode.READ_ONLY, None, Mode.READ_ONLY),
+        (Mode.FULL, None, Mode.WORKSPACE),  # 全放行不带进无人值守
+        (Mode.FULL, Mode.FULL, Mode.FULL),  # 显式写了才全放行
+        (Mode.WORKSPACE, Mode.READ_ONLY, Mode.READ_ONLY),
+    ],
+)
+def test_unattended_mode(configured: Mode, explicit: Mode | None, expected: Mode):
+    assert PermissionsConfig(mode=configured).unattended(explicit) is expected
 
 
 # ------------------------------------------------------------------ MCP server（M5）

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from simpleagent.events import MessageDone
+from simpleagent.permissions import Mode
 from simpleagent.spaces.models import DESCRIPTION_MAX, EXECUTOR_LABELS, Space, one_line
 
 # 项目说明：先找指令文件（和 M7 一样，有 AGENTS.md 就不读 CLAUDE.md），再加 README
@@ -99,7 +100,8 @@ def gather_material(space: Space, cwd: Path | None, titles: list[str]) -> str | 
         f"- 执行者：{executor}",
     ]
     if space.executor != "simpleagent":
-        parts.append(f"- 权限：{'只读' if space.permission == 'safe' else '全放行（能改文件）'}")
+        full = space.effective_mode(Mode.READ_ONLY) is Mode.FULL
+        parts.append(f"- 权限：{'全放行（能改文件）' if full else '只读'}")
     if cwd is not None:
         parts.append(f"- 工作目录：{cwd}")
     for name, text in docs:

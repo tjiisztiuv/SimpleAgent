@@ -98,7 +98,9 @@ class APIApprover:
         future = self.pending.add(approval_id, req)
         # 推一帧给客户端，然后挂起等决策
         self.bus.publish(
-            approval_request_frame(req.session_id, approval_id, req.tool_name, req.arguments)
+            approval_request_frame(
+                req.session_id, approval_id, req.tool_name, req.arguments, req.reason
+            )
         )
         try:
             decision = await future

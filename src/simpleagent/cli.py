@@ -20,6 +20,7 @@ from simpleagent.config import (
     load_config,
 )
 from simpleagent.panel.store import LEVELS
+from simpleagent.permissions import Mode, parse_mode
 from simpleagent.scheduler import ScheduleError, init_schedules, load_schedules, schedules_path
 from simpleagent.ui.debug import DEBUG_LEVELS
 
@@ -58,6 +59,17 @@ def session_store() -> SessionStore:
 def parse_allowed(text: str) -> list[str]:
     """`--allow "bash, write_file"` → `["bash", "write_file"]`。"""
     return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def mode_arg(text: str) -> Mode:
+    """--mode 的取值：英文值和中文名都认，认不出来让 argparse 报错并列出可选值。"""
+    try:
+        return parse_mode(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+MODE_HELP = "权限模式：只读 read-only / 工作区 workspace / 全放行 full"
 
 
 def resolve_resume(store: SessionStore, value: str | None) -> Session | None:
@@ -122,7 +134,9 @@ def list_schedules(now: datetime | None = None) -> int:
     if not path.exists():
         print(f"还没有定时任务：先 `sa init` 生成 {path}，照里面的示例写一个。")
         return 0
-    schedules = load_schedules(path, profiles=load_config().profiles)
+    config = load_config()
+    permissions = config.permissions
+    schedules = load_schedules(path, profiles=config.profiles)
     if not schedules.jobs and not schedules.errors:
         print(f"{path} 里还没有任务。")
         return 0
@@ -133,8 +147,9 @@ def list_schedules(now: datetime | None = None) -> int:
             detail = [job.cron, "已停用"]
         else:
             detail = [job.cron, f"下次 {format_fire_time(job.next_fire(now))}"]
-            tools = ", ".join(job.allowed_tools) if job.allowed_tools else "只读工具"
-            detail.append(f"工具 {tools}")
+            detail.append(f"权限 {permissions.unattended(job.mode).label}")
+            if job.allowed_tools:
+                detail.append(f"允许 {', '.join(job.allowed_tools)}")
             if job.profile:
                 detail.append(job.profile)
         print(f"    {' · '.join(detail)}")
@@ -210,6 +225,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("-m", "--profile", help="模型 profile，默认取配置里的 default_profile")
     parser.add_argument(
+        "--mode",
+        type=mode_arg,
+        default=None,
+        metavar="MODE",
+        help=f"{MODE_HELP}；默认取配置里的 [permissions].mode（工作区）",
+    )
+    parser.add_argument(
         "--resume",
         nargs="?",
         const=LATEST,
@@ -241,6 +263,13 @@ def main(argv: list[str] | None = None) -> int:
         default=argparse.SUPPRESS,
         metavar="ID",
         help="接着某个已有会话跑",
+    )
+    run.add_argument(
+        "--mode",
+        type=mode_arg,
+        default=argparse.SUPPRESS,
+        metavar="MODE",
+        help=f"{MODE_HELP}；默认跟配置走，但不继承「全放行」",
     )
     # 用 SUPPRESS 而不是 None：子解析器没传时不要把父级 -m/--profile 的值覆盖掉
     run.add_argument("-m", "--profile", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
@@ -326,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 load_config(),
                 profile=args.profile,
                 cwd=cwd,
+                mode=args.mode,
                 allowed_tools=parse_allowed(args.allow),
                 session=session,
                 store=store,
@@ -342,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         return Repl(
             load_config(),
             profile=args.profile,
+            mode=args.mode,
             session=resolve_resume(store, args.resume),
             store=store,
             debug=args.debug,
