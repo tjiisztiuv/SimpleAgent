@@ -5,10 +5,13 @@
     recent_sessions 列出打开的空间里最近的会话（只读），追问前靠它找会话
     followup        在已有会话里接着问（沿用它的上下文），等这一轮跑完
 
-    command_tools(dispatcher, parent=..., approver=...)  每轮对话造一份，状态只活在这一轮
+    command_tools(dispatcher, parent=..., approver=..., require_plan=...)
+                    每轮对话造一份，状态只活在这一轮
 
 「跨空间先确认」由这里的代码保证，不只靠 prompt。dispatch 和 followup 走同一道关（admit）：
 - 本轮第一个空间随便派；要派到第二个不同的空间，而本轮还没有批准过的计划，直接报错；
+- require_plan（调度会话引用过控制面板的消息）：连第一个空间也要先有批准过的计划。
+  消息正文可能来自邮件、脚本投递，照着它派活之前必须让用户看一眼；
 - 计划批准之后，派到计划外的空间也报错；
 - 同一个空间上一个子任务还没跑完，不许再派（同一个目录里两个 agent 同时写会互相踩）。
 
@@ -228,10 +231,17 @@ class _TurnState:
     running: set[str] = field(default_factory=set)  # 正在跑的空间 id
 
 
-def command_tools(dispatcher: Dispatcher, *, parent: str, approver: Approver | None) -> list[Tool]:
+def command_tools(
+    dispatcher: Dispatcher,
+    *,
+    parent: str,
+    approver: Approver | None,
+    require_plan: bool = False,
+) -> list[Tool]:
     """调度者这一轮用的工具。parent 是调度者自己的会话 id，子会话记着它。
 
     approver 为 None（无人值守）时计划一律视为未批准：跨空间的事没人确认就不做。
+    require_plan 为 True 时只派一个空间也要先 propose_plan（任务来自引用的消息）。
     """
     state = _TurnState()
 
@@ -277,6 +287,11 @@ def command_tools(dispatcher: Dispatcher, *, parent: str, approver: Approver | N
 
         调用方从检查到登记之间不能有 await：同一批并行的调用按顺序依次过这道关，并行绕不过去。
         """
+        if require_plan and state.plan is None:
+            raise ToolError(
+                "这次的任务来自引用的消息：派发前先用 propose_plan 把计划交给用户确认，"
+                "只派一个空间也要"
+            )
         if state.plan is not None:
             if space.id not in state.plan:
                 raise ToolError(

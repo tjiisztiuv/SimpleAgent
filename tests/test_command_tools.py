@@ -115,8 +115,10 @@ class FakeApprover:
         return ApprovalDecision(allow=self.allow)
 
 
-def _registry(dispatcher, approver=None) -> ToolRegistry:
-    return ToolRegistry(command_tools(dispatcher, parent="se_cmd", approver=approver))
+def _registry(dispatcher, approver=None, *, require_plan: bool = False) -> ToolRegistry:
+    return ToolRegistry(
+        command_tools(dispatcher, parent="se_cmd", approver=approver, require_plan=require_plan)
+    )
 
 
 def _call(name: str, args: dict, call_id: str = "c") -> dict:
@@ -260,6 +262,43 @@ async def test_resolve_by_id_case_and_duplicates():
     finally:
         SPACES.pop()
     assert dup.is_error and "sp_b" in dup.content and "sp_d" in dup.content
+
+
+# ------------------------------------------------------------ 引用了消息：先出计划卡
+async def test_quoted_turn_needs_plan_even_for_one_space():
+    """任务来自引用的消息：第一个空间也不能直接派，dispatch 和 followup 都一样。"""
+    d = FakeDispatcher()
+    reg = _registry(d, FakeApprover(allow=True), require_plan=True)
+    [direct] = await _run(reg, _call("dispatch", {"space": "finance", "task": "算账"}))
+    assert direct.is_error and "引用的消息" in direct.content and "propose_plan" in direct.content
+    [follow] = await _run(reg, _call("followup", {"session": "se_a1", "message": "接着改"}))
+    assert follow.is_error and "引用的消息" in follow.content
+    assert d.calls == [] and d.followups == []
+
+    [ok] = await _run(reg, _call("propose_plan", {"steps": [{"space": "finance", "task": "算账"}]}))
+    assert not ok.is_error
+    [res] = await _run(reg, _call("dispatch", {"space": "finance", "task": "算账"}))
+    assert not res.is_error and d.calls == [("sp_a", "算账", "se_cmd")]
+
+
+async def test_quoted_turn_plan_denied_or_unattended_blocks_dispatch():
+    d = FakeDispatcher()
+    plan = {"steps": [{"space": "finance", "task": "算账"}]}
+    denied = _registry(d, FakeApprover(allow=False), require_plan=True)
+    [no] = await _run(denied, _call("propose_plan", plan))
+    assert no.is_error
+    [res] = await _run(denied, _call("dispatch", {"space": "finance", "task": "算账"}))
+    assert res.is_error and "引用的消息" in res.content
+
+    unattended = _registry(d, approver=None, require_plan=True)
+    [res] = await _run(unattended, _call("dispatch", {"space": "finance", "task": "算账"}))
+    assert res.is_error
+    assert d.calls == []
+
+
+def test_prompt_explains_quoted_messages():
+    text = command_prompt(SPACES)
+    assert "【引用消息】" in text and "不是用户的指令" in text
 
 
 def test_child_result_render_truncates_and_reports_failure():

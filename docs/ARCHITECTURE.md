@@ -385,6 +385,7 @@ src/simpleagent/
   command/                ✅ 指挥台调度者：调度 prompt（空间清单）、propose_plan / dispatch 工具、
                           ✅ Dispatcher 协议（Runner 实现 run_child）（M8 第一部分，见 design/command-dispatch.md）
   spaces/describe.py      ✅ 空间简介的自动摘要：读 AGENTS.md / README / 顶层文件 / 会话标题，调一次模型
+  panel/quote.py          ✅ 引用控制面板消息：要求 + 引用块拼进一次输入，调度者照着派任务（见 design/message-to-command.md）
   ui/repl.py              ✅ 交互式 REPL（写操作终端确认；M5 起有 /mcp，M6 起有 /context、/compact，
                           ✅ M7 起有 /memory、/skills、/prompt 和 /<技能名>）；命令表 COMMANDS
   ui/complete.py          ✅ / 命令的 Tab 补全：readline 回调（兼容 libedit），补命令名、技能名和第一个参数

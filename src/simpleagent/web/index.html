@@ -70,6 +70,7 @@
             <span class="panel-sub">说任务自动派发 · @空间名 直派</span></div>
           <div class="panel-body" id="dispatch-list"></div>
           <div class="panel-foot">
+            <div id="dispatch-quote" class="reply-chip hidden"></div>
             <div id="dispatch-reply" class="reply-chip hidden"></div>
             <textarea id="dispatch-input" rows="2" placeholder="要做什么？调度者会派给合适的空间，跨空间先给你看计划（@空间名 开头 = 直接下发）"></textarea>
             <div class="composer-bar">
@@ -159,6 +160,7 @@
     <div class="modal-foot">
       <button id="mm-copy" class="btn">复制</button>
       <button id="mm-todo" class="btn">+备忘</button>
+      <button id="mm-command" class="btn" title="挂到指挥台的输入框上，补一句要求再下发">交给指挥台</button>
       <button id="mm-archive" class="btn">归档</button>
       <a id="mm-link" class="btn hidden" target="_blank" rel="noopener noreferrer">打开链接</a>
       <span class="spacer"></span>

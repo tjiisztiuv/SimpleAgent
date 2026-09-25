@@ -42,6 +42,7 @@ from simpleagent.config import TOOL_OUTPUT_DIRNAME, Config, home_dir
 from simpleagent.events import Event, MessageDone, ToolResult
 from simpleagent.knowledge import Knowledge
 from simpleagent.mcp.manager import McpManager
+from simpleagent.panel.quote import has_quote
 from simpleagent.panel.store import PanelStore
 from simpleagent.panel.summary import summarize
 from simpleagent.permissions import Policy
@@ -716,6 +717,7 @@ class Runner:
         模型看 config.toml 的 [command].profile（不填用默认 profile），不看空间自己的 profile。
         工具每轮新造：「本轮派过哪些空间、批准过什么计划」只在这一轮有效。
         审批器给一份独立的「始终允许」记录：计划每次都要人看，不能被一次「始终允许」放过去。
+        引用过控制面板消息的调度会话，派发前一律先出计划卡（command_tools 的 require_plan）。
         """
         name = self.config.command.profile or self.config.default_profile
         llm = self.llm_factory(name, self.config.profiles[name])
@@ -726,8 +728,14 @@ class Runner:
             cached = (Knowledge(), command_prompt(self.targets()))
             self._prompts[session.id] = cached
         approver = APIApprover(self.bus, self.pending, {})
+        # 这个调度会话引用过消息（这一轮或之前）：之后每次派发都要先出计划卡。
+        # 看落盘的原始历史：本轮的输入在构造 agent 之前已经落了，模型那份历史可能被压缩过
+        quoted = any(
+            m.get("role") == "user" and has_quote(str(m.get("content") or ""))
+            for m in self.store.load_session(space.id, session.id).messages
+        )
         tools = ToolRegistry(
-            command_tools(self, parent=session.id, approver=approver),
+            command_tools(self, parent=session.id, approver=approver, require_plan=quoted),
             max_output_chars=self.config.tool_output.max_chars,
             max_output_lines=self.config.tool_output.max_lines,
         )
