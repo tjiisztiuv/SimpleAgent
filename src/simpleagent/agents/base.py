@@ -14,11 +14,15 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from simpleagent.events import Event, Usage
+from simpleagent.permissions import Mode
 
 # 权限档位。两家的无头模式都没法把「要不要批准」实时问回给我们（claude 要外接 MCP 的
-# --permission-prompt-tool，opencode 只能预置 allow/deny），所以 v1 只能预先定档：
-SAFE = "safe"  # 只读：只放行读类工具，改文件 / 跑命令一律拒绝
-FULL = "full"  # 全放行：不经确认就能改文件、跑命令（界面上要标红）
+# --permission-prompt-tool，opencode 只能预置 allow/deny），所以只能预先定档。
+# 取值和内置执行者的权限模式（permissions.Mode）是同一套，空间设置里一个下拉管两种执行者：
+SAFE = Mode.READ_ONLY.value  # 只读：只放行读类工具，改文件 / 跑命令一律拒绝
+FULL = Mode.FULL.value  # 全放行：不经确认就能改文件、跑命令（界面上要标红）
+# 外部 CLI 暂时没有「工作区」档：claude 的 acceptEdits、opencode 的 external_directory
+# 都还没接，接上之前不提供兑现不了的选项
 PERMISSIONS = (SAFE, FULL)
 PERMISSION_LABELS = {
     SAFE: "只读（只放行读类工具）",

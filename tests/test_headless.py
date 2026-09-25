@@ -12,8 +12,9 @@ import pytest
 
 from simpleagent.agent.session import Session
 from simpleagent.cli import list_sessions, resolve_resume, session_store
-from simpleagent.config import Config, Profile
+from simpleagent.config import Config, PermissionsConfig, Profile
 from simpleagent.llm.fake import FakeLLM, Script
+from simpleagent.permissions import Mode
 from simpleagent.ui.headless import Headless
 
 
@@ -22,6 +23,7 @@ def make_headless(
     config: Config,
     scripts: list[Script],
     allowed: tuple[str, ...] = (),
+    mode: Mode | None = None,
 ) -> tuple[Headless, FakeLLM]:
     factory_calls: list[FakeLLM] = []
 
@@ -34,9 +36,11 @@ def make_headless(
     frontend = Headless(
         config,
         cwd=tmp_path,
+        mode=mode,
         allowed_tools=allowed,
         llm_factory=factory,
         out=out,
+        err=io.StringIO(),
     )
     return frontend, factory_calls[0]
 
@@ -64,7 +68,7 @@ async def test_headless_records_history(config: Config, tmp_path: Path):
 
 # ------------------------------------------------------------ 2. 无人值守的权限
 async def test_write_is_refused_without_allow(config: Config, tmp_path: Path):
-    """没有白名单就没人可以按 y：模型拿到的是一条明确的拒绝，而且文件没被创建。"""
+    """只读模式下没有白名单就没人可以按 y：模型拿到的是一条明确的拒绝，而且文件没被创建。"""
     frontend, _ = make_headless(
         tmp_path,
         config,
@@ -76,6 +80,7 @@ async def test_write_is_refused_without_allow(config: Config, tmp_path: Path):
             },
             "好吧",
         ],
+        mode=Mode.READ_ONLY,
     )
     assert await frontend.run("写个文件") == 0
     assert not (tmp_path / "a.txt").exists()
@@ -98,9 +103,53 @@ async def test_allow_list_lets_the_tool_run(config: Config, tmp_path: Path):
             "写好了",
         ],
         allowed=("write_file",),
+        mode=Mode.READ_ONLY,
     )
     await frontend.run("写个文件")
     assert (tmp_path / "a.txt").read_text() == "x"
+
+
+async def test_workspace_default_writes_inside_but_bash_still_needs_allow(
+    config: Config, tmp_path: Path
+):
+    """默认是工作区模式：工作目录里写文件不用 --allow，bash 还是要。"""
+    frontend, _ = make_headless(
+        tmp_path,
+        config,
+        [
+            {
+                "tool_calls": [
+                    {"name": "write_file", "arguments": {"path": "a.txt", "content": "x"}},
+                    {"name": "bash", "arguments": {"command": "echo hi > b.txt"}},
+                ]
+            },
+            "好",
+        ],
+    )
+    await frontend.run("写两个文件")
+    assert (tmp_path / "a.txt").read_text() == "x"
+    assert not (tmp_path / "b.txt").exists()
+    assert "已被拒绝" in frontend.session.messages[-2]["content"]
+
+
+def test_unattended_runs_do_not_inherit_full_access(config: Config, tmp_path: Path):
+    """配置里的「全放行」是给交互用的，sa run 不继承；显式给 --mode full 才全放行。"""
+    config.permissions = PermissionsConfig(mode=Mode.FULL)
+    inherited, _ = make_headless(tmp_path, config, ["好"])
+    assert inherited.agent.tools.policy.mode is Mode.WORKSPACE
+    explicit, _ = make_headless(tmp_path, config, ["好"], mode=Mode.FULL)
+    assert explicit.agent.tools.policy.mode is Mode.FULL
+    config.permissions = PermissionsConfig(mode=Mode.READ_ONLY)
+    conservative, _ = make_headless(tmp_path, config, ["好"])
+    assert conservative.agent.tools.policy.mode is Mode.READ_ONLY
+
+
+async def test_run_prints_permission_line_to_stderr(config: Config, tmp_path: Path):
+    frontend, _ = make_headless(
+        tmp_path, config, ["好"], allowed=("bash", "write_file"), mode=Mode.READ_ONLY
+    )
+    await frontend.run("看看")
+    assert "权限：只读 · 允许：bash, write_file\n" in frontend.err.getvalue()
 
 
 async def test_dangerous_command_is_denied_even_when_allowed(config: Config, tmp_path: Path):

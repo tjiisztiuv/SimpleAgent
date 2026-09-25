@@ -10,7 +10,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from simpleagent.permissions import Mode
 from simpleagent.spaces.models import EXECUTOR_LABELS, Space
+
+# 内置执行者在各权限模式下能干什么，调度者据此决定派不派、要不要提醒用户会被问
+_BUILTIN_ABILITY = {
+    Mode.READ_ONLY: "能读文件；改文件、跑命令都要用户批准",
+    Mode.WORKSPACE: "能读文件、改工作目录里的文件；跑命令要用户批准",
+    Mode.FULL: "全放行：能改文件、跑命令，不经确认",
+}
 
 COMMAND_PROMPT = """\
 你是 SimpleAgent 工作台的调度者（指挥台）。用户在指挥台交代一件事，\
@@ -58,17 +66,18 @@ def _where(space: Space) -> str:
     return "临时目录（通用任务，没有固定项目）"
 
 
-def _ability(space: Space) -> str:
-    """这个空间能干什么：内置执行者读写都行（写要人批准），外部 CLI 看权限档。"""
+def _ability(space: Space, default_mode: Mode) -> str:
+    """这个空间能干什么：看执行者和它实际生效的权限模式。"""
     executor = EXECUTOR_LABELS.get(space.executor, space.executor)
+    mode = space.effective_mode(default_mode)
     if space.executor == "simpleagent":
-        return f"{executor}；能读写文件、跑命令（写操作要用户批准）"
-    if space.permission == "full":
+        return f"{executor}；{_BUILTIN_ABILITY[mode]}"
+    if mode is Mode.FULL:
         return f"{executor}；全放行：能改文件、跑命令，不经确认"
     return f"{executor}；只读：只能看文件，不能改、不能跑命令"
 
 
-def spaces_section(spaces: list[Space]) -> str:
+def spaces_section(spaces: list[Space], default_mode: Mode = Mode.WORKSPACE) -> str:
     if not spaces:
         return "# 可用的空间\n（还没有任何空间。告诉用户先在左栏新建空间。）"
     lines = ["# 可用的空间"]
@@ -77,17 +86,23 @@ def spaces_section(spaces: list[Space]) -> str:
         lines += [
             f"- **{space.name}**（id `{space.id}`）",
             f"  - 简介：{description}",
-            f"  - 执行者：{_ability(space)}",
+            f"  - 执行者：{_ability(space, default_mode)}",
             f"  - 目录：{_where(space)}",
         ]
     return "\n".join(lines)
 
 
-def command_prompt(spaces: list[Space], now: datetime | None = None) -> str:
+def command_prompt(
+    spaces: list[Space],
+    now: datetime | None = None,
+    *,
+    # 没单独设过权限的内置空间按这个算；默认值和 [permissions].mode 的一致，runner 传配置里的
+    default_mode: Mode = Mode.WORKSPACE,
+) -> str:
     now = now or datetime.now()
     weekday = "一二三四五六日"[now.weekday()]
     return (
         f"{COMMAND_PROMPT}\n\n"
         f"# 环境\n- 日期：{now:%Y-%m-%d}（星期{weekday}）\n\n"
-        f"{spaces_section(spaces)}"
+        f"{spaces_section(spaces, default_mode)}"
     )

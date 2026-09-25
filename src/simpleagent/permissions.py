@@ -8,6 +8,10 @@
 - ``Approver`` 是**异步询问接口**：只有 decide 给出 ask 时才被调用，负责真的去问人
   （终端读一行、客户端推一帧等回调、无人值守时直接说不行）。它不需要懂命令危不危险。
 
+权限模式（只读 / 工作区 / 全放行）是 Policy 的一个旋钮，决定哪些调用不用问就放行。
+它对应 dsh 的「沙箱模式 + 审批策略」预设：模式定下每类调用是放行、问还是拒，
+「问」落到谁手里由前端挑的 Approver 决定（有人问人，无人按白名单或直接拒）。
+
 为什么要分两层：不分开的话，每个前端都得各自实现一遍「`rm -rf /` 该拦」，REPL 记得拦、
 定时任务忘了拦，就会在某个凌晨三点让 agent 自己格式化磁盘。把危险判定收进 Policy，
 三个前端共用同一条底线，谁也绕不过去。
@@ -38,16 +42,63 @@ class Decision(StrEnum):
 Permission = Literal["allow", "ask", "deny"]
 
 
+class Mode(StrEnum):
+    """权限模式：一个旋钮定下哪些调用不用问。
+
+    | 调用                         | 只读 | 工作区 | 全放行 |
+    |------------------------------|------|--------|--------|
+    | 读文件、搜索、只读 MCP       | 放行 | 放行   | 放行   |
+    | 改工作目录里的文件           | 问   | 放行   | 放行   |
+    | 改工作目录外的文件           | 拒   | 拒     | 放行   |
+    | bash、其他有副作用的工具     | 问   | 问     | 放行   |
+    | 危险命令、被禁用的工具       | 拒   | 拒     | 拒     |
+
+    工作区模式下 bash 仍然要问：没有 OS 沙箱，就管不住一条命令会写到哪里。
+    """
+
+    READ_ONLY = "read-only"
+    WORKSPACE = "workspace"
+    FULL = "full"
+
+    @property
+    def label(self) -> str:
+        return MODE_LABELS[self]
+
+
+MODE_LABELS = {Mode.READ_ONLY: "只读", Mode.WORKSPACE: "工作区", Mode.FULL: "全放行"}
+# 一句话讲清这个模式放行什么：REPL 的 /mode、客户端的权限下拉共用
+MODE_SUMMARY = {
+    Mode.READ_ONLY: "改文件、跑命令都先问你",
+    Mode.WORKSPACE: "工作目录里改文件不用问；跑命令要问，写到工作目录外直接拒",
+    Mode.FULL: "什么都不问（危险命令照样拦）",
+}
+
+
+def parse_mode(text: str) -> Mode:
+    """把用户敲的模式名转成 Mode：英文值和中文名都认（`workspace`、`工作区`）。"""
+    value = text.strip().lower()
+    for mode in Mode:
+        if value in (mode.value, mode.label):
+            return mode
+    choices = "、".join(f"{mode.label}（{mode.value}）" for mode in Mode)
+    raise ValueError(f"未知的权限模式：{text}。可选：{choices}")
+
+
 @dataclass(frozen=True)
 class Scope:
     """一次调用的作用范围：够用来判断能不能自动放行，就够了。
 
     paths 是**会被改动**的绝对路径：只读工具不需要报（它们不受工作目录边界限制），
     写工具必须报。command 只有当次要跑 shell 命令时才给。
+
+    file_edit 表示这次调用的全部副作用就是改 paths 里的文件（write_file / edit_file），
+    工作区模式只自动放行这一类。要工具显式声明而不是从「有 paths、没 command」推出来：
+    以后的工具可能既改文件又有别的副作用，推断错了就是少问一次，声明漏了只是多问一次。
     """
 
     paths: tuple[Path, ...] = ()
     command: str | None = None
+    file_edit: bool = False
 
 
 @dataclass(frozen=True)
@@ -245,7 +296,13 @@ def _resolve(path: Path) -> Path:
 
 
 class Policy:
-    """判定一次工具调用该怎么处理。纯函数，无 IO，工作目录在构造时固定。"""
+    """判定一次工具调用该怎么处理。无 IO，工作目录在构造时固定。
+
+    mode 可以在会话中途改（REPL 的 /mode、客户端的空间设置）：decide() 每次现读，
+    改完从下一次工具调用起生效，不用重建 agent。
+
+    代码里的默认模式是只读（M3 的原始行为）；产品默认用哪个模式由各入口从配置里读了传进来。
+    """
 
     def __init__(
         self,
@@ -253,27 +310,35 @@ class Policy:
         *,
         home: Path | None = None,
         allow_read_outside: bool = True,
+        mode: Mode = Mode.READ_ONLY,
     ) -> None:
         self.cwd = _resolve(cwd)
         self.home = _resolve(home or Path.home())
         # 只读工具不受工作目录边界限制；写工具由 Scope.paths 里的绝对路径把关
         self.allow_read_outside = allow_read_outside
+        self.mode = mode
 
     def decide(self, permission: Permission, scope: Scope) -> Judgment:
-        # 顺序很关键：越界检查和危险命令排在默认等级之前，
-        # 否则工具只要声明 permission="allow" 就能绕过工作目录边界。
+        # 顺序很关键：
+        # - 危险命令排在模式之前：全放行也拦，它是所有模式、所有前端共用的底线。
+        # - 越界检查排在默认等级之前：否则工具只要声明 permission="allow" 就能绕过工作目录边界。
         if permission == "deny":
             return Judgment(Decision.DENY, "这个工具已被配置为禁用。")
+        if scope.command and (reason := inspect_command(scope.command, self.cwd, self.home)):
+            return Judgment(Decision.DENY, reason)
+        if self.mode is Mode.FULL:
+            return Judgment(Decision.ALLOW)
         for path in scope.paths:
             if not self._inside(path):
                 return Judgment(
                     Decision.DENY,
                     f"拒绝：目标路径在工作目录之外——{path}\n"
-                    f"当前工作目录是 {self.cwd}，请把文件写到这个目录里。",
+                    f"当前工作目录是 {self.cwd}，「{self.mode.label}」模式只能改这个目录里的文件。"
+                    "确实要写到外面，请用户切到「全放行」模式。",
                 )
-        if scope.command and (reason := inspect_command(scope.command, self.cwd, self.home)):
-            return Judgment(Decision.DENY, reason)
         if permission == "allow":
+            return Judgment(Decision.ALLOW)
+        if self.mode is Mode.WORKSPACE and scope.file_edit:
             return Judgment(Decision.ALLOW)
         return Judgment(Decision.ASK)
 

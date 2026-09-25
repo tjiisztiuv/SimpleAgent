@@ -10,9 +10,13 @@
 #   "*/30 * * * *"   每 30 分钟
 #   "30 2 * * *"     每天 2:30
 #
-# 定时任务跑的时候没有人可以确认：需要确认的工具（write_file / edit_file / bash）
-# 只有列进 allowed_tools 才会执行，其余一律拒绝，原因回给模型。
-# 写到工作目录之外、危险命令（rm -rf ~ 之类）任何情况下都拒绝。
+# 定时任务跑的时候没有人可以确认。先看权限模式（mode）：
+#   只读 read-only：改文件、跑命令都要确认
+#   工作区 workspace：工作目录里改文件不用确认；跑命令要确认
+#   全放行 full：什么都不用确认
+# 不写 mode 就跟 config.toml 的 [permissions].mode 走，但不继承「全放行」，要全放行得在任务里显式写。
+# 模式里「要确认」的调用，只有工具列进 allowed_tools 才会执行，其余一律拒绝，原因回给模型。
+# 除了全放行，写到工作目录之外都拒绝；危险命令（rm -rf ~ 之类）任何模式都拒绝。
 
 # [jobs.downloads-digest]
 # title = "下载目录周报"
@@ -22,7 +26,8 @@
 # """
 # profile = "deepseek"            # 默认用 config.toml 的 default_profile
 # cwd = "~/notes"                 # 工作目录，写文件只能写在这里；默认 ~/.simpleagent/jobs/<名字>/
-# allowed_tools = []              # 允许自动执行的工具，如 ["write_file"]；不写就只能用只读工具
+# mode = "workspace"              # 权限模式；默认跟 config.toml 走（不继承全放行）
+# allowed_tools = []              # 要确认的调用里，哪些工具自动放行，如 ["bash"]
 # timeout = 900                   # 秒，超时就取消这次运行
 # max_steps = 30                  # 覆盖 config.toml 的 max_steps
 # enabled = false                 # 暂停这个任务，不用删掉

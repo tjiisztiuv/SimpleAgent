@@ -170,7 +170,9 @@ def test_patch_executor_roundtrip(config, sa_home):
     r = _patch(server, space.id, {"executor": "simpleagent", "profile": "b"})
     assert r.status == 200
     assert r.body["executor"] == "simpleagent" and r.body["profile"] == "b"
-    assert r.body["agent"] is None and r.body["permission"] == "safe"
+    # 切回内置没带 permission：回到「没单独设过」，实际跟配置默认（工作区）
+    assert r.body["agent"] is None and r.body["permission"] is None
+    assert r.body["mode"] == "workspace"
 
 
 def test_patch_executor_rejects_bad_input(config, sa_home):

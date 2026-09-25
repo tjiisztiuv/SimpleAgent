@@ -25,6 +25,10 @@ M3 已完成（2026-09-17）：权限拆成「判定 + 询问」两层，写操�
 
 M3 剩下的两件事（不挡 M4 的路，到时候按需补）：权限等级目前写死在工具上，**还没进配置文件**
 （`config.toml` 里不能写「这个项目 bash 全部放行」），M4 的定时任务要用到这套配置；`--allow` 只支持工具名，不支持模式匹配。
+2026-09-25 补了一半：加了权限模式（只读 / 工作区 / 全放行，照 dsh 的预设），`config.toml` 的
+`[permissions] mode`、`sa --mode`、REPL 的 `/mode`、客户端每个空间单独设、定时任务的 `mode` 都能指定，
+见 [design/permission-mode.md](design/permission-mode.md)。按工具、按命令写的规则还没做；
+bash 的系统级沙箱（macOS Seatbelt）先搁置，以后做成一个可开关的选项。
 
 M8 的「外部 agent」提前做掉了一半（2026-09-17，随 W 里程碑）：Claude Code / OpenCode 已经能作为
 **空间执行者**无头跑起来（`src/simpleagent/agents/`，事件流翻译成我们自己的帧，支持 resume 和取消），

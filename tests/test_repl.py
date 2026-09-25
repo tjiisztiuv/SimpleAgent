@@ -9,6 +9,7 @@ import pytest
 from simpleagent.agent.session import SessionStore
 from simpleagent.config import Config, ConfigError, Profile
 from simpleagent.llm.fake import FakeLLM, Script
+from simpleagent.permissions import Mode
 from simpleagent.ui.repl import Repl
 
 
@@ -21,6 +22,7 @@ class Harness:
         scripts: dict[str, list[Script]],
         inputs: Iterable[str] = (),
         broken: set[str] = frozenset(),
+        mode: Mode | None = None,
     ):
         self.out = io.StringIO()
         self.fakes: dict[str, FakeLLM] = {}
@@ -38,7 +40,7 @@ class Harness:
             except StopIteration:
                 raise EOFError from None
 
-        self.repl = Repl(config, llm_factory=factory, out=self.out, input_fn=input_fn)
+        self.repl = Repl(config, llm_factory=factory, out=self.out, input_fn=input_fn, mode=mode)
 
     @property
     def output(self) -> str:
@@ -434,3 +436,65 @@ async def test_mcp_command_without_servers(config: Config):
     h = Harness(config, {})
     await h.repl.handle("/mcp")
     assert "没有配置 MCP server" in h.output
+
+
+# ------------------------------------------------------------ 权限模式
+def mode_of(h: Harness) -> Mode:
+    assert h.repl.agent.tools.policy is not None
+    return h.repl.agent.tools.policy.mode
+
+
+def test_mode_defaults_to_config_and_can_be_overridden(config: Config):
+    assert mode_of(Harness(config, {})) is Mode.WORKSPACE
+    assert mode_of(Harness(config, {}, mode=Mode.READ_ONLY)) is Mode.READ_ONLY
+
+
+async def test_mode_command_lists_and_switches(config: Config):
+    h = Harness(config, {})
+    await h.repl.handle("/mode")
+    assert "* 工作区" in h.output and "  只读" in h.output and "  全放行" in h.output
+
+    h.reset()
+    await h.repl.handle("/mode 全放行")
+    assert mode_of(h) is Mode.FULL
+    assert "权限：全放行——什么都不问" in h.output
+
+    await h.repl.handle("/mode read-only")
+    assert mode_of(h) is Mode.READ_ONLY
+
+
+async def test_mode_command_rejects_unknown_and_keeps_current(config: Config):
+    h = Harness(config, {})
+    await h.repl.handle("/mode yolo")
+    assert "未知的权限模式" in h.output
+    assert mode_of(h) is Mode.WORKSPACE
+
+
+async def test_mode_switch_applies_to_the_next_tool_call(config: Config, tmp_path, monkeypatch):
+    """切到只读后，下一次 write_file 就要问（这里审批器读到 EOF 按拒绝处理）。"""
+    monkeypatch.chdir(tmp_path)
+    write = {"tool_calls": [{"name": "write_file", "arguments": {"path": "a.txt", "content": "x"}}]}
+    h = Harness(config, {"a": [write, "写好了", write, "没写成"]})
+    await h.repl.handle("写一个")
+    assert (tmp_path / "a.txt").read_text() == "x"  # 工作区：直接写
+
+    (tmp_path / "a.txt").unlink()
+    await h.repl.handle("/mode 只读")
+    await h.repl.handle("再写一个")
+    assert not (tmp_path / "a.txt").exists()
+    assert "需要确认：write_file" in h.output
+
+
+def test_startup_shows_mode(config: Config):
+    h = Harness(config, {}, mode=Mode.FULL)
+    assert h.repl.run() == 0
+    assert "权限：全放行（/mode 切换）" in h.output
+
+
+def test_cli_rejects_unknown_mode(capsys: pytest.CaptureFixture[str]):
+    from simpleagent.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--mode", "yolo"])
+    assert exc.value.code == 2
+    assert "未知的权限模式" in capsys.readouterr().err

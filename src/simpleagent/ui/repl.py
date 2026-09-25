@@ -42,7 +42,7 @@ from simpleagent.knowledge import Knowledge
 from simpleagent.knowledge.skills import SkillError
 from simpleagent.llm.client import LLM, LLMClient
 from simpleagent.mcp.manager import McpManager
-from simpleagent.permissions import Approver, Policy
+from simpleagent.permissions import MODE_SUMMARY, Approver, Mode, Policy, parse_mode
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
 from simpleagent.ui.approve import ConsoleApprover
@@ -65,6 +65,7 @@ DIM, RED, BOLD, RESET = "\033[2m", "\033[31m", "\033[1m", "\033[0m"
 # 内置命令：名字 → (参数, 说明)。/help 和 Tab 补全都从这里取，新增命令记得加一行
 COMMANDS: dict[str, tuple[str, str]] = {
     "model": ("[name]", "查看或切换模型 profile（对话历史保留）"),
+    "mode": ("[模式]", "查看或切换权限模式：只读 / 工作区 / 全放行（下一次工具调用起生效）"),
     "tools": ("", "列出当前可用的工具"),
     "mcp": ("", "查看 MCP server 的状态（连上没有、几个工具、重启过几次）"),
     "debug": ("[LEVEL]", "查看或切换 debug：off / on / verbose / full（过程输出走 stderr）"),
@@ -93,7 +94,7 @@ HELP = "\n".join(
             f"  {_pad(f'/{name} {args}'.rstrip(), 16)}{desc}"
             for name, (args, desc) in COMMANDS.items()
         ),
-        "按 Tab 补全命令名、技能名和 /model、/debug 的参数。",
+        "按 Tab 补全命令名、技能名和 /model、/mode、/debug 的参数。",
         '多行输入：单独一行输入 """ 开始，再输入 """ 结束。',
         "Ctrl+C 中断当前回复，Ctrl+D 退出。",
     ]
@@ -248,6 +249,7 @@ class Repl:
         store: SessionStore | None = None,
         approver: Approver | None = None,
         policy: Policy | None = None,
+        mode: Mode | None = None,  # 权限模式；不给就用配置里的 [permissions].mode
         err: TextIO | None = None,
         debug: str | None = None,  # off / on / verbose / full；不给就听配置的
     ):
@@ -284,7 +286,8 @@ class Repl:
                 max_output_chars=config.tool_output.max_chars,
                 max_output_lines=config.tool_output.max_lines,
                 approver=approver or ConsoleApprover(input_fn=input_fn, out=self.out),
-                policy=policy or Policy(cwd),
+                # 模式只在这个进程里有效，不写进会话文件：--resume 回来按启动时的模式
+                policy=policy or Policy(cwd, mode=mode or config.permissions.mode),
             ),
             system_prompt=build_system_prompt(
                 config.system_prompt, cwd=cwd, knowledge=self.knowledge
@@ -318,6 +321,10 @@ class Repl:
     def run(self) -> int:
         llm = self.agent.llm
         self.print(f"SimpleAgent · {llm.name}（{llm.profile.model}）", BOLD)
+        if (policy := self.agent.tools.policy) is not None:
+            self.print(
+                f"权限：{policy.mode.label}（/mode 切换）", RED if policy.mode is Mode.FULL else DIM
+            )
         if dev_checkout():
             self.print(f"开发模式：数据目录 {home_dir()}", DIM)
         if self.resumed:
@@ -362,7 +369,7 @@ class Repl:
         """/ 开头按 Tab 补全的候选：内置命令 + 技能；/model、/debug 还补第一个参数。"""
         return SlashCompleter(
             [*COMMANDS, *self.knowledge.skills.skills],
-            {"model": self.config.profiles, "debug": DEBUG_LEVELS},
+            {"model": self.config.profiles, "mode": [m.value for m in Mode], "debug": DEBUG_LEVELS},
         )
 
     def _start_mcp(self, runner: asyncio.Runner) -> None:
@@ -490,6 +497,8 @@ class Repl:
                     self.print("没有配置 MCP server：在 config.toml 里加 [mcp_servers.<名字>]")
                 for line in self.mcp.describe():
                     self.print(line)
+            case "mode":
+                self._set_mode(arg)
             case "debug":
                 self._set_debug(arg)
             case "memory":
@@ -569,6 +578,32 @@ class Repl:
             self.print("没有可以压缩的内容（历史太短，或者只剩上一次的摘要）", DIM)
             return
         self.print(f"[{edited.summary()}]", DIM)
+
+    def _set_mode(self, text: str) -> None:
+        """/mode [模式]：不带参数列出三档和当前这档，带参数切换。
+
+        改的是注册表里那个 Policy 的 mode，下一次工具调用起按新模式判定，不用重建 agent。
+        """
+        policy = self.agent.tools.policy
+        if policy is None:
+            self.print("这个会话没有启用权限判定", DIM)
+            return
+        if not text:
+            for mode in Mode:
+                mark = "*" if mode is policy.mode else " "
+                self.print(
+                    f" {mark} {_pad(mode.label, 8)}{_pad(mode.value, 11)}{MODE_SUMMARY[mode]}"
+                )
+            return
+        try:
+            policy.mode = parse_mode(text)
+        except ValueError as e:
+            self.print(str(e), RED)
+            return
+        self.print(
+            f"权限：{policy.mode.label}——{MODE_SUMMARY[policy.mode]}",
+            RED if policy.mode is Mode.FULL else DIM,
+        )
 
     def _set_debug(self, level: str) -> None:
         if not level:

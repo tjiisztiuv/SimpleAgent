@@ -245,7 +245,10 @@ def test_pending_approvals_carry_details(config, sa_home):
     from simpleagent.serve.runner import Runner
 
     store = SpaceStore(sa_home)
-    space = store.create_space(SpaceSpec(name="t", kind="generic", profile="a"))
+    # 只读模式：工作区模式下写工作目录里的文件不用问，就没有审批可测了
+    space = store.create_space(
+        SpaceSpec(name="t", kind="generic", profile="a", permission="read-only")
+    )
     session = store.create_session(space.id)
     script = [
         {
@@ -397,10 +400,17 @@ def test_meta(config):
     assert execs["simpleagent"]["models"] == ["a", "b"]
     assert execs["claude-code"]["external"] is True
     assert execs["claude-code"]["models"] == []
-    # 权限两档由后端给，向导里直接渲染
-    assert [p["name"] for p in execs["claude-code"]["permissions"]] == ["safe", "full"]
-    assert execs["claude-code"]["default_permission"] == "safe"
-    assert execs["simpleagent"]["permissions"] == []
+    # 权限选项由后端给，向导里直接渲染：内置三档（默认跟配置），外部 CLI 两档（默认只读）
+    assert [p["name"] for p in execs["simpleagent"]["permissions"]] == [
+        "read-only",
+        "workspace",
+        "full",
+    ]
+    workspace = execs["simpleagent"]["permissions"][1]
+    assert workspace["label"] == "工作区" and workspace["description"].startswith("工作目录里")
+    assert execs["simpleagent"]["default_permission"] == "workspace"
+    assert [p["name"] for p in execs["claude-code"]["permissions"]] == ["read-only", "full"]
+    assert execs["claude-code"]["default_permission"] == "read-only"
 
 
 # ------------------------------------------------- 2b. 新建空间：四种组合与校验

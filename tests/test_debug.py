@@ -619,7 +619,8 @@ async def test_debug_off_leaves_output_untouched(config: Config, tmp_path: Path)
 
     frontend = Headless(config, cwd=tmp_path, llm_factory=factory, out=out, err=err)
     assert await frontend.run("干活") == 0
-    assert err.getvalue() == ""
+    # stderr 只有开跑时那行权限状态，没有 debug 输出
+    assert err.getvalue() == "权限：工作区\n"
     assert "耗时" in out.getvalue()
 
 

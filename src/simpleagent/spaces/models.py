@@ -17,6 +17,7 @@ from datetime import UTC
 from typing import Any, Literal
 
 from simpleagent.agents.base import PERMISSIONS, SAFE
+from simpleagent.permissions import Mode, parse_mode
 
 
 def _now() -> str:
@@ -74,21 +75,41 @@ def locked_reason(session_executor: str, space_executor: str) -> str:
     )
 
 
+# W 里程碑时外部 CLI 的「只读」存的是 safe
+LEGACY_PERMISSIONS = {"safe": SAFE}
+
+
+def normalize_permission(value: str | None) -> str | None:
+    """空间的权限模式统一存 Mode 的值；None 表示没单独设过（见 Space.effective_mode）。
+
+    兼容旧值 safe 和中文名；认不出来抛 ValueError（API 层转 400）。
+    """
+    if not value:
+        return None
+    if value in LEGACY_PERMISSIONS:
+        return LEGACY_PERMISSIONS[value]
+    return parse_mode(value).value
+
+
 def validate_executor(
-    executor: str, *, cli_model: str | None, permission: str, command: str | None
+    executor: str, *, cli_model: str | None, permission: str | None, command: str | None
 ) -> None:
-    """「谁跑」这组字段的合法性，新建（from_spec）和切换（change_executor）共用。"""
+    """「谁跑」这组字段的合法性，新建（from_spec）和切换（change_executor）共用。
+
+    permission 要先过 normalize_permission。
+    """
     if executor not in EXECUTORS:
         raise ValueError(f"未知的执行者：{executor}")
     if executor == "simpleagent":
         if cli_model:
             raise ValueError("内置执行者的模型用 profile 选，不要填 cli_model")
-        if permission != SAFE:
-            raise ValueError("内置执行者的权限由审批器管，不要填 permission")
     elif command is None and executor not in DEFAULT_CLI_COMMAND:
         raise ValueError(f"执行者 {executor} 没有默认命令，请显式填 command")
+    if permission is None or executor == "simpleagent":
+        return
     if permission not in PERMISSIONS:
-        raise ValueError(f"未知的权限档：{permission}")
+        choices = "、".join(f"「{Mode(p).label}」" for p in PERMISSIONS)
+        raise ValueError(f"外部 CLI 暂时只有{choices}两档，不支持「{Mode(permission).label}」")
 
 
 @dataclass
@@ -237,7 +258,8 @@ class SpaceSpec:
     executor: str = "simpleagent"
     profile: str = "default"  # executor=simpleagent 时用
     cli_model: str | None = None  # executor 是外部 CLI 时用；None = 不注入配置
-    permission: str = SAFE  # 外部 CLI 的权限档：safe 只读 / full 全放行
+    # 权限模式（Mode 的值，中文名和旧值 safe 也认）；None = 不单独设，见 Space.effective_mode
+    permission: str | None = None
     pin_dir: str | None = None
     cwd: str | None = None
     command: str | None = None
@@ -258,7 +280,9 @@ class Space:
     executor: str = "simpleagent"  # 只管谁跑：simpleagent | claude-code | opencode
     profile: str = "default"  # executor=simpleagent 时的模型
     cli_model: str | None = None  # 外部 CLI 的模型 preset；None = 用本机默认配置
-    permission: str = SAFE  # 外部 CLI 的权限档（safe 只读 / full 全放行）
+    # 权限模式：read-only / workspace / full（外部 CLI 只有前后两档）。
+    # None = 没单独设过：内置执行者跟 config.toml 的 [permissions].mode，外部 CLI 按只读
+    permission: str | None = None
     cwd: str | None = None  # kind=agent 时必填；kind=generic 时为空（用 tmp）
     opened: bool = True  # 是否在左栏显示（关闭只是不显示，不删数据）
     pinned: bool = False
@@ -274,10 +298,11 @@ class Space:
         """从向导入参构造，顺便把非法组合拦在这儿（API 层直接转 400）。"""
         if spec.kind not in ("generic", "agent"):
             raise ValueError(f"未知的空间形态：{spec.kind}")
+        permission = normalize_permission(spec.permission)
         validate_executor(
             spec.executor,
             cli_model=spec.cli_model,
-            permission=spec.permission,
+            permission=permission,
             command=spec.command,
         )
         if spec.kind == "agent" and not spec.cwd:
@@ -308,7 +333,7 @@ class Space:
             executor=spec.executor,
             profile=spec.profile,
             cli_model=spec.cli_model,
-            permission=spec.permission,
+            permission=permission,
             cwd=spec.cwd,
             created_at=created,
             last_opened_at=created,
@@ -316,6 +341,15 @@ class Space:
             agent=agent,
             verify=verify,
         )
+
+    def effective_mode(self, default: Mode) -> Mode:
+        """这个空间实际生效的权限模式。default 是 config.toml 的 [permissions].mode。
+
+        没单独设过的：内置执行者跟配置默认；外部 CLI 按只读——它的审批卡管不到，宁可少给。
+        """
+        if self.permission:
+            return Mode(self.permission)
+        return default if self.executor == "simpleagent" else Mode.READ_ONLY
 
     def to_dict(self) -> dict[str, Any]:
         """整份空间定义序列化为可 JSON 化的 dict（嵌套 dataclass 一并展开）。"""

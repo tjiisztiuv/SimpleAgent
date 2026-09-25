@@ -14,6 +14,8 @@ from typing import Literal
 from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from simpleagent.permissions import Mode, parse_mode
+
 # 任务名要当日志目录名和命令行参数用，只收这几种字符；中文名写进 title
 JOB_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 # 没写 cwd 的任务在 <home>/jobs/<name>/ 里跑：Policy 只允许写工作目录，等于自带沙箱
@@ -35,12 +37,20 @@ class Job(BaseModel):
     enabled: bool = True
     profile: str | None = None  # None = config.toml 的 default_profile
     cwd: str | None = None  # None = <home>/jobs/<name>/；存不存在到运行时再查
-    # 无人值守时允许自动执行的工具，和 `sa run --allow` 同义；不写就只能用只读工具
+    # 权限模式，和 `sa run --mode` 同义（中文名也认）。None = 跟 config.toml 的
+    # [permissions].mode 走，但不继承「全放行」（PermissionsConfig.unattended）
+    mode: Mode | None = None
+    # 无人值守时允许自动执行的工具，和 `sa run --allow` 同义：回答模式里「要问」的那些调用
     allowed_tools: list[str] = Field(default_factory=list)
     notify: list[str] | None = None  # 结论发到哪些渠道；None = 用全局默认渠道
     notify_on: NotifyOn = "always"  # always / error（只在出错时通知）/ never
     timeout: int = Field(900, ge=10, le=86_400)  # 秒，超时就取消这次运行
     max_steps: int | None = Field(None, ge=1)  # None = 用 config.toml 的 max_steps
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _parse_mode(cls, value: object) -> object:
+        return parse_mode(value) if isinstance(value, str) else value
 
     @field_validator("name")
     @classmethod

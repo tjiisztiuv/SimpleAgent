@@ -32,6 +32,7 @@
       </div>
       <div class="ws-meta">
         <span id="ws-dir" class="ws-dir"></span>
+        <span id="ws-mode" class="chip hidden"></span>
         <span id="ws-verify" class="chip hidden"></span>
         <span id="ws-usage" class="chip hidden"></span>
       </div>
@@ -135,10 +136,9 @@
     <div class="field-hint hidden" id="f-model-hint">
       本机默认：不注入任何配置，等同于在那个目录下直接运行 claude / opencode
     </div>
-    <label class="field hidden" id="f-perm-wrap"><span>权限</span><select id="f-permission"></select></label>
-    <div class="field-hint hidden" id="f-perm-hint">
-      全放行：这个空间的外部 agent 不经确认就会改文件、跑命令（我们的审批卡管不到它）
-    </div>
+    <label class="field" id="f-perm-wrap"><span>权限</span><select id="f-permission"></select></label>
+    <!-- 选中那档的一句说明，全放行时换成警示；文案由 syncModalFields 按执行者填 -->
+    <div class="field-hint hidden" id="f-perm-hint"></div>
     <label class="field hidden" id="f-cwd-wrap"><span>工作目录</span>
       <input id="f-cwd" placeholder="/Users/…/project"></label>
     <label class="field" id="f-verify-wrap"><span>验证命令（可选）</span><input id="f-verify" placeholder="uv run pytest -q"></label>

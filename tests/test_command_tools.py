@@ -18,7 +18,7 @@ from simpleagent.command import (
     command_tools,
     spaces_section,
 )
-from simpleagent.permissions import ApprovalDecision, ApprovalRequest
+from simpleagent.permissions import ApprovalDecision, ApprovalRequest, Mode
 from simpleagent.spaces.models import COMMAND_SPACE_ID, Space
 from simpleagent.tools import ToolContext, ToolError, ToolRegistry
 
@@ -317,6 +317,19 @@ def test_prompt_lists_spaces_with_abilities():
     assert "没写简介" in text
     assert "临时目录" in text  # main 是通用空间
     assert "还没有任何空间" in spaces_section([])
+
+
+def test_prompt_describes_builtin_spaces_by_mode():
+    """内置空间的能力按实际生效的权限模式写：没单独设过的跟配置默认。"""
+    spaces = [
+        _space("sp_x", "x"),
+        _space("sp_y", "y", permission="read-only"),
+        _space("sp_z", "z", permission="full"),
+    ]
+    text = command_prompt(spaces, default_mode=Mode.WORKSPACE)
+    assert "能读文件、改工作目录里的文件；跑命令要用户批准" in text  # x 跟默认
+    assert "改文件、跑命令都要用户批准" in text  # y 只读
+    assert "全放行：能改文件、跑命令，不经确认" in text  # z
 
 
 # ------------------------------------------------------------ 追问已有的会话

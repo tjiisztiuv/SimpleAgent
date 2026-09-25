@@ -97,7 +97,7 @@ def _edit(path: Path, old: str, new: str, replace_all: bool) -> str:
     description=DESCRIPTION,
     readonly=False,
     permission="ask",
-    scope=lambda args, ctx: Scope(paths=(ctx.resolve(args.path),)),
+    scope=lambda args, ctx: Scope(paths=(ctx.resolve(args.path),), file_edit=True),
 )
 async def edit_file(args: EditFileArgs, ctx: ToolContext) -> str:
     path = ctx.resolve(args.path)

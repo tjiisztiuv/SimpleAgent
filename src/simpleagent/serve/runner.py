@@ -45,7 +45,7 @@ from simpleagent.mcp.manager import McpManager
 from simpleagent.panel.quote import has_quote
 from simpleagent.panel.store import PanelStore
 from simpleagent.panel.summary import summarize
-from simpleagent.permissions import Policy
+from simpleagent.permissions import Mode, Policy
 from simpleagent.serve.approval import APIApprover, ApprovalDecision, PendingApprovals
 from simpleagent.serve.bus import EventBus
 from simpleagent.serve.frames import (
@@ -261,6 +261,22 @@ class Runner:
         decision = _action_to_decision(action)
         self._loop.call_soon_threadsafe(self.pending.resolve, approval_id, decision)
         return True
+
+    def apply_mode(self, space_id: str, mode: Mode) -> None:
+        """空间的权限模式改了：这个空间里正在跑的内置会话，从下一次工具调用起按新模式判定。
+
+        HTTP 线程调进来，真正改 Policy 放到 runner 的事件循环上做，和 approve() 一样。
+        外部 CLI 的权限在拉起进程时就定了，改了只影响下一轮。
+        """
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._apply_mode, space_id, mode)
+
+    def _apply_mode(self, space_id: str, mode: Mode) -> None:
+        for session_id, agent in list(self._agents.items()):
+            policy = agent.tools.policy
+            if policy is not None and self.store.get_session_meta(space_id, session_id):
+                policy.mode = mode
 
     def space_busy(self, space_id: str) -> bool:
         """这个空间有没有会话正在跑。切执行者前要问：跑到一半换人会乱。
@@ -577,16 +593,17 @@ class Runner:
         meta = self.store.get_session_meta(space.id, session.id)
         resume = (meta.agent_session_id if meta else None) or None
         adapter = adapter_for(executor)
+        mode = space.effective_mode(self.config.permissions.mode).value
         argv = adapter.command(
             user_input,
             command=space.agent.command if space.agent else None,
             model=space.cli_model,
             resume=resume,
-            mode=space.permission,
+            mode=mode,
         )
         cwd = self.cwd_for(space)
         # 本机默认 = 只继承现有环境；adapter.env() 只在需要注入配置时才有内容
-        env = {**os.environ, **adapter.env(space.permission)}
+        env = {**os.environ, **adapter.env(mode)}
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -697,8 +714,12 @@ class Runner:
         )
         approver = APIApprover(self.bus, self.pending, self.always_allow)
         tools.approver = approver
-        # 客户端模式也走同一套权限判定：越界和危险命令先被拦掉，剩下的才去问客户端
-        tools.policy = Policy(cwd)
+        # 客户端模式也走同一套权限判定：越界和危险命令先被拦掉，剩下的才去问客户端。
+        # 模式看空间自己的设置；中途改了由 apply_mode 改这个 Policy，下一次工具调用起生效。
+        # 模式要从存储里现读：_run_turn 读完空间后还会等 MCP 启动，这期间改的模式
+        # apply_mode 够不着（agent 还没登记），传进来的 space 又是旧的，整轮就会按旧模式跑
+        latest = self.store.get_space(space.id) or space
+        tools.policy = Policy(cwd, mode=latest.effective_mode(self.config.permissions.mode))
         output_dir = home_dir() / TOOL_OUTPUT_DIRNAME
         return Agent(
             llm=llm,
@@ -725,7 +746,10 @@ class Runner:
         if cached is None:
             # 空间清单在会话开始时拼一次，之后不变（前缀缓存）。Knowledge 为空：
             # _run_input 要拿它展开 /技能名，调度者没有技能
-            cached = (Knowledge(), command_prompt(self.targets()))
+            cached = (
+                Knowledge(),
+                command_prompt(self.targets(), default_mode=self.config.permissions.mode),
+            )
             self._prompts[session.id] = cached
         approver = APIApprover(self.bus, self.pending, {})
         # 这个调度会话引用过消息（这一轮或之前）：之后每次派发都要先出计划卡。

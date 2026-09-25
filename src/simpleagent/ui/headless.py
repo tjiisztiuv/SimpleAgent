@@ -4,6 +4,8 @@
 
 - 审批器换成 `WhitelistApprover`：名单外的写操作一律拒绝，**不再试图问人**。
   没有人在屏幕前的时候，「需要确认」和「拒绝」是同一件事，区别只在要不要把原因告诉模型。
+  权限模式照样生效（默认跟配置，但不继承「全放行」，见 PermissionsConfig.unattended）：
+  模式决定哪些调用不用问，白名单回答剩下那些「要问」的。
 - 渲染更朴素：正文直出，工具调用一行概要，不带颜色也不做分段。
 
 M4 的 `sa daemon` 会把同一个核心换成「按时间表触发」，前台渲染换成写运行日志，
@@ -35,7 +37,7 @@ from simpleagent.knowledge import Knowledge
 from simpleagent.knowledge.skills import SkillError
 from simpleagent.llm.client import LLM, LLMClient
 from simpleagent.mcp.manager import McpManager
-from simpleagent.permissions import Policy, WhitelistApprover
+from simpleagent.permissions import Mode, Policy, WhitelistApprover
 from simpleagent.tools import ToolRegistry, builtin_tools
 from simpleagent.trace import Tracer, new_session_id
 from simpleagent.ui.debug import DebugRenderer, debug_level, supports_color
@@ -67,6 +69,7 @@ class Headless:
         profile: str | None = None,
         *,
         cwd: Path | None = None,
+        mode: Mode | None = None,  # 不给就按 config.permissions.unattended() 的规则
         allowed_tools: Iterable[str] = (),
         llm_factory: LLMFactory | None = None,
         out: TextIO | None = None,
@@ -81,6 +84,7 @@ class Headless:
         self.err_color = supports_color(self.err)
         self.debug = debug or debug_level(config)
         self.cwd = cwd or Path.cwd()
+        self.allowed_tools = list(allowed_tools)  # 保留顺序：开跑时那行状态照用户写的顺序列
         self.store = store
         self.session = session or Session(new_session_id())
         name = profile or config.default_profile
@@ -100,8 +104,8 @@ class Headless:
             [*builtin_tools(), *self.knowledge.tools()],
             max_output_chars=config.tool_output.max_chars,
             max_output_lines=config.tool_output.max_lines,
-            approver=WhitelistApprover(allowed_tools),
-            policy=Policy(self.cwd),
+            approver=WhitelistApprover(self.allowed_tools),
+            policy=Policy(self.cwd, mode=config.permissions.unattended(mode)),
         )
         self.agent = Agent(
             llm=factory(name, config.profiles[name]),
@@ -136,6 +140,7 @@ class Headless:
             self.err.write(f"技能加载失败：{e}\n")
             return 1
         # 状态走 stderr：`sa run ... > out.txt` 的正文里不混进这些
+        self.err.write(self.permission_line() + "\n")
         if summary := self.knowledge.summary():
             self.err.write(summary + "\n")
         await self._start_mcp()
@@ -143,6 +148,14 @@ class Headless:
             return await self._run(prompt)
         finally:
             await self.mcp.close()
+
+    def permission_line(self) -> str:
+        """开跑时打在 stderr 的一行：事后看日志也知道这次按什么权限跑的。"""
+        assert self.agent.tools.policy is not None
+        line = f"权限：{self.agent.tools.policy.mode.label}"
+        if self.allowed_tools:
+            line += f" · 允许：{', '.join(self.allowed_tools)}"
+        return line
 
     async def _start_mcp(self) -> None:
         if not self.mcp.enabled:

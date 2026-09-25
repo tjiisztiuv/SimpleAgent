@@ -128,6 +128,15 @@ const STATUS_TEXT = { running: "运行中", verifying: "验证中", done: "完�
 
 /* 卡片徽标：执行者决定「谁跑」，形态决定「在哪儿跑」。
    内置执行者 + 通用形态就显示「通用」，其余按执行者缩写。 */
+/* 权限模式。sp.mode 是后端算好的实际生效那档：没单独设过的内置空间已经按配置默认算了 */
+const MODE_LABEL = { "read-only": "只读", workspace: "工作区", full: "全放行" };
+
+function fullAccessTitle(sp) {
+  return (sp.executor || "simpleagent") === "simpleagent"
+    ? "这个空间全放行：改文件、跑命令都不经确认（危险命令照样拦）"
+    : "这个空间的外部 agent 不经确认就会改文件、跑命令";
+}
+
 function badgeFor(sp) {
   const exec = sp.executor || "simpleagent";
   if (exec === "simpleagent") return sp.kind === "generic" ? ["通用", ""] : ["SA", "b-sa"];
@@ -168,8 +177,8 @@ function renderSpaces() {
     const [label, cls] = badgeFor(sp);
     const dir = sp.cwd || null;
     const danger =
-      (sp.executor || "simpleagent") !== "simpleagent" && sp.permission === "full"
-        ? `<span class="warn-chip" title="这个空间的外部 agent 不经确认就会改文件、跑命令">全放行</span>`
+      sp.mode === "full"
+        ? `<span class="warn-chip" title="${escapeHtml(fullAccessTitle(sp))}">全放行</span>`
         : "";
     const vs = sp.sessions || [];
     const vsum = vs.length
@@ -319,13 +328,22 @@ function renderHeader() {
     const [label, cls] = badgeFor(sp);
     badge.className = `badge ${cls}`;
     badge.textContent = label;
-    badge.title =
-      (sp.executor || "simpleagent") !== "simpleagent" && sp.permission === "full"
-        ? "这个空间的外部 agent 不经确认就会改文件、跑命令"
-        : "";
+    badge.title = sp.mode === "full" ? fullAccessTitle(sp) : "";
     badge.classList.remove("hidden");
   } else {
     badge.classList.add("hidden");
+  }
+
+  // 当前空间的权限模式：全放行标红；在「空间设置」里改，正在跑的会话下一次工具调用起生效。
+  // 指挥台不显示：调度者没有文件工具，计划卡每次都要人确认，模式对它不起作用
+  const mc = $("ws-mode");
+  if (sp && sp.mode && sp.id !== state.commandSpaceId) {
+    mc.textContent = `权限：${MODE_LABEL[sp.mode] || sp.mode}`;
+    mc.className = sp.mode === "full" ? "chip c-failed" : "chip";
+    mc.title = sp.mode === "full" ? fullAccessTitle(sp) : "在「空间设置」里切换";
+    mc.classList.remove("hidden");
+  } else {
+    mc.classList.add("hidden");
   }
 
   const dir = (sp && sp.cwd) || "";
@@ -1896,9 +1914,9 @@ function openModal(sp) {
     fillExecutorDependents();
     if ($("f-executor").value === "simpleagent") {
       if (state.profiles.includes(editing.profile)) $("f-profile").value = editing.profile;
-    } else {
-      $("f-permission").value = editing.permission || "safe";
     }
+    // 两种执行者都有权限下拉；显示实际生效的那档（没单独设过的就是配置默认）
+    if (editing.mode) $("f-permission").value = editing.mode;
   } else {
     $("f-name").value = "";
     $("f-cwd").value = "";
@@ -1945,9 +1963,21 @@ function syncModalFields() {
   const external = $("f-executor").value !== "simpleagent";
   $("f-cwd-wrap").classList.toggle("hidden", kind !== "agent");
   $("f-model-hint").classList.toggle("hidden", !external);
-  $("f-perm-wrap").classList.toggle("hidden", !external);
   $("f-model-label").textContent = external ? "模型" : "模型 profile";
-  $("f-perm-hint").classList.toggle("hidden", !external || $("f-permission").value !== "full");
+  // 下拉框下面一行说明：全放行给警示，内置执行者的其他档讲清放行什么
+  const hint = $("f-perm-hint");
+  const perm = $("f-permission").value;
+  const info = state.executors.find((e) => e.name === $("f-executor").value);
+  const option = ((info && info.permissions) || []).find((p) => p.name === perm);
+  if (perm === "full") {
+    hint.textContent = external
+      ? "全放行：这个空间的外部 agent 不经确认就会改文件、跑命令（我们的审批卡管不到它）"
+      : "全放行：改文件、跑命令都不经确认，只有危险命令（rm -rf ~ 之类）照样拦";
+  } else {
+    hint.textContent = (option && option.description) || "";
+  }
+  hint.classList.toggle("warn", perm === "full");
+  hint.classList.toggle("hidden", !hint.textContent);
   const ed = state.editingSpace;
   $("f-switch-hint").classList.toggle(
     "hidden", !ed || (ed.executor || "simpleagent") === $("f-executor").value);
@@ -1963,8 +1993,8 @@ function executorFields() {
     // 本机默认 = 不传 cli_model；以后有 preset 时这里换成选中的 preset 名
     const cliModel = $("f-profile").value;
     if (cliModel) body.cli_model = cliModel;
-    body.permission = $("f-permission").value;
   }
+  body.permission = $("f-permission").value;
   return body;
 }
 

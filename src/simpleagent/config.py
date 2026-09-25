@@ -23,6 +23,8 @@ from pydantic import (
     model_validator,
 )
 
+from simpleagent.permissions import Mode, parse_mode
+
 CONFIG_FILENAME = "config.toml"
 ENV_FILENAME = ".env"
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -226,6 +228,33 @@ class PanelConfig(BaseModel):
     archive_after_minutes: int = Field(30, ge=1)
 
 
+class PermissionsConfig(BaseModel):
+    """权限模式（只读 / 工作区 / 全放行），见 permissions.Mode。
+
+    以后按工具、按命令写的 allow / deny 规则也放在这张表里。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 交互会话（REPL、客户端里没单独设过的空间）默认用哪个模式；中文名也认
+    mode: Mode = Mode.WORKSPACE
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _parse_mode(cls, value: object) -> object:
+        return parse_mode(value) if isinstance(value, str) else value
+
+    def unattended(self, explicit: Mode | None = None) -> Mode:
+        """无人值守（sa run、定时任务）用哪个模式：显式给了就用；否则跟配置，但不继承「全放行」。
+
+        配置里改成全放行多半是图交互时省事，不该连带让没人盯着的任务也全放行；
+        真要全放行，得在那次运行上显式写 --mode full。
+        """
+        if explicit is not None:
+            return explicit
+        return Mode.WORKSPACE if self.mode is Mode.FULL else self.mode
+
+
 class CommandConfig(BaseModel):
     """指挥台的调度者：把一句任务派给合适的空间，跨空间时先出计划等确认。"""
 
@@ -318,6 +347,7 @@ class Config(BaseModel):
     debug: DebugConfig = Field(default_factory=DebugConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
     command: CommandConfig = Field(default_factory=CommandConfig)
+    permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     # MCP server，按配置顺序启动；工具名是 mcp__<名字>__<工具>
     mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 

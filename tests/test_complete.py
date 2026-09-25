@@ -117,3 +117,4 @@ def test_repl_completer_includes_skills_and_profiles(
     assert c.candidates("/re") == ["/release"]
     assert c.candidates("/model ") == ["a", "b"]
     assert c.candidates("/debug f") == ["full"]
+    assert c.candidates("/mode ") == ["full", "read-only", "workspace"]

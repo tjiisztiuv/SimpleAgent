@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from simpleagent.permissions import Mode
 from simpleagent.spaces.models import SpaceSpec
 from simpleagent.spaces.store import SpaceStore, new_id
 
@@ -224,7 +225,8 @@ def test_change_executor_builtin_to_cli(tmp_path: Path):
     assert got is not None
     assert got.executor == "claude-code"
     assert got.agent is not None and got.agent.command == "claude"
-    assert got.permission == "safe"
+    assert got.permission is None  # 没单独设过：外部 CLI 按只读
+    assert got.effective_mode(Mode.FULL) is Mode.READ_ONLY
     assert got.profile == "deepseek"  # 留着，切回内置时接着用
 
 
@@ -238,7 +240,8 @@ def test_change_executor_cli_to_builtin(tmp_path: Path):
     got = st.get_space(sp.id)
     assert got is not None
     assert got.executor == "simpleagent" and got.profile == "kimi"
-    assert got.agent is None and got.cli_model is None and got.permission == "safe"
+    # 没带 permission：外部 CLI 的「全放行」不带到内置执行者上，回到跟配置默认
+    assert got.agent is None and got.cli_model is None and got.permission is None
     toml = (tmp_path / "spaces" / sp.id / "space.toml").read_text(encoding="utf-8")
     assert "[agent]" not in toml and "permission" not in toml
 
@@ -269,8 +272,9 @@ def test_change_executor_rejects_invalid(tmp_path: Path):
     bad = [
         {"executor": "gpt"},
         {"executor": "simpleagent", "cli_model": "deepseek"},
-        {"executor": "simpleagent", "permission": "full"},
+        {"executor": "simpleagent", "permission": "root"},
         {"executor": "claude-code", "permission": "root"},
+        {"executor": "claude-code", "permission": "workspace"},  # 外部 CLI 还没有工作区档
     ]
     for kwargs in bad:
         with pytest.raises(ValueError):
@@ -382,3 +386,61 @@ def test_description_too_long_rejected(tmp_path: Path):
     with pytest.raises(ValueError, match="最多 200 字"):
         st.update_space(sp.id, description="字" * 201)
     assert st.get_space(sp.id).description == ""
+
+
+# ------------------------------------------------------------ 权限模式
+def test_effective_mode_follows_config_only_for_builtin(tmp_path: Path):
+    """没单独设过的空间：内置执行者跟配置默认，外部 CLI 按只读。设过的就按设的。"""
+    st = store(tmp_path)
+    builtin = st.create_space(SpaceSpec(name="a", kind="generic"))
+    external = st.create_space(SpaceSpec(name="b", kind="generic", executor="claude-code"))
+    assert builtin.permission is None and external.permission is None
+    assert builtin.effective_mode(Mode.WORKSPACE) is Mode.WORKSPACE
+    assert builtin.effective_mode(Mode.FULL) is Mode.FULL
+    assert external.effective_mode(Mode.FULL) is Mode.READ_ONLY
+
+    pinned = st.create_space(SpaceSpec(name="c", kind="generic", permission="只读"))
+    assert pinned.permission == "read-only"
+    assert pinned.effective_mode(Mode.FULL) is Mode.READ_ONLY
+
+
+def test_builtin_permission_roundtrips_through_toml(tmp_path: Path):
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="t", kind="generic"))
+    toml = tmp_path / "spaces" / sp.id / "space.toml"
+    assert "permission" not in toml.read_text(encoding="utf-8")  # 没设过就不写
+
+    st.change_executor(sp.id, "simpleagent", permission="full")
+    assert 'permission = "full"' in toml.read_text(encoding="utf-8")
+    got = SpaceStore(home=tmp_path).get_space(sp.id)
+    assert got is not None and got.permission == "full"
+
+
+def test_external_cli_has_no_workspace_mode(tmp_path: Path):
+    st = store(tmp_path)
+    with pytest.raises(ValueError, match="工作区"):
+        st.create_space(
+            SpaceSpec(name="t", kind="generic", executor="opencode", permission="workspace")
+        )
+
+
+@pytest.mark.parametrize(
+    ("written", "loaded"),
+    [
+        ('"safe"', "read-only"),  # W 里程碑的旧值
+        ('"full"', "full"),
+        ('"工作区"', "workspace"),  # 手写中文也认
+        ('"readonly"', "read-only"),  # 写错了宁可少给权限，也不让空间从列表里消失
+    ],
+)
+def test_legacy_and_hand_written_permission(tmp_path: Path, written: str, loaded: str):
+    st = store(tmp_path)
+    sp = st.create_space(SpaceSpec(name="t", kind="generic"))
+    toml = tmp_path / "spaces" / sp.id / "space.toml"
+    # 插在顶层字段里：追加到文件末尾会落进最后那个 [generic] 表
+    text = toml.read_text(encoding="utf-8").replace(
+        'executor = "simpleagent"\n', f'executor = "simpleagent"\npermission = {written}\n'
+    )
+    toml.write_text(text, encoding="utf-8")
+    got = SpaceStore(home=tmp_path).get_space(sp.id)
+    assert got is not None and got.permission == loaded
