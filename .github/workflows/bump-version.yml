@@ -1,0 +1,52 @@
+# main 每次更新，把版本号最后一位 +1（0.2.0 → 0.2.1），提交回 main。
+# - bot 用 GITHUB_TOKEN 推的提交不会再触发 workflow，不会循环
+# - 这次推送自己改过版本号（手动发 0.3.0 这种正式版本）就跳过
+# - 不打 tag；正式版本的 tag 和 docs/releases/ 仍然手动做
+name: 版本号 +1
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# 连着推几次时排队跑，避免两次都从同一个版本号 +1
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      # 取最新的 main 而不是触发这次运行的提交：排队期间前一次运行可能已经推了新版本号
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # 和 build-system 的 uv_build 同一代，免得新版 uv 重写 uv.lock 的格式
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.x"
+
+      - name: 版本号 +1
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          # 只比较这次推送本身前后的版本号，不看排队期间别人推的
+          before=$(git show "$BEFORE:pyproject.toml" 2>/dev/null | grep -m1 '^version' || true)
+          after=$(git show "$AFTER:pyproject.toml" | grep -m1 '^version')
+          if [ -n "$before" ] && [ "$before" != "$after" ]; then
+            echo "这次推送改了版本号（$before → $after），不再 +1"
+            exit 0
+          fi
+
+          uv version --bump patch --no-sync   # 同时改 pyproject.toml 和 uv.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898583+github-actions[bot]@users.noreply.github.com"
+          git commit -am "版本号 $(uv version --short)"
+          # checkout 之后又有人推了 main：拉下来再推
+          git push || (git pull --rebase && git push)
