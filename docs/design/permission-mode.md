@@ -178,7 +178,7 @@ REPL 里 `/mode` 列出三档和当前这档，`/mode 全放行` 切换，下一
 
 ## 6. 验证
 
-**自动化**：`ruff format`、`ruff check` 通过；`pytest` 全量 809 个通过（改动前 780 个）。新增和调整的测试：
+**自动化**：`ruff format`、`ruff check` 通过；`pytest` 全量 810 个通过（`origin/main` 上是 759 个，新增 51 个）。新增和调整的测试：
 
 | 文件 | 覆盖 |
 |---|---|
